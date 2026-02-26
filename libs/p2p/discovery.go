@@ -654,6 +654,11 @@ func ParseBootStrapAddrs(addrs []string) (discv5Nodes []string) {
 	return discv5Nodes
 }
 
+func ParseMultiAddrs(addrs []string) (multiAddrs []string) {
+	_, multiAddrs = parseGenericAddrs(addrs)
+	return multiAddrs
+}
+
 func parseGenericAddrs(addrs []string) (enodeString, multiAddrString []string) {
 	for _, addr := range addrs {
 		if addr == "" {

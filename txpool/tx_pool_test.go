@@ -63,10 +63,9 @@ func TestWashTxs(t *testing.T) {
 	assert.Nil(t, pool.Add(tx))
 
 	txs := pool.Executables()
-	assert.Nil(t, err)
 	assert.Equal(t, types.Transactions{tx}, txs)
 
-	txs, _, err = pool.wash(pool.chain.BestBlock().Header(), time.Second*10)
+	txs, _, err := pool.wash(pool.chain.BestBlock().Header(), time.Second*10)
 	assert.Nil(t, err)
 	assert.Equal(t, types.Transactions{tx}, txs)
 }

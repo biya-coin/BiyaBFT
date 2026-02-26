@@ -166,6 +166,9 @@ func (e *Executor) applyBlock(blk *block.Block, syncingToHeight int64) (appHash 
 		return
 	}
 	appHash = abciResponse.AppHash
+	if err := e.chain.SaveFinalizeBlockResponseFromAbci(blk.ID(), abciResponse); err != nil {
+		e.logger.Error("failed to save FinalizeBlock response", "err", err)
+	}
 	e.logger.Info(
 		"Finalized block",
 		"height", blk.Number(),
@@ -194,8 +197,14 @@ func (e *Executor) applyBlock(blk *block.Block, syncingToHeight int64) (appHash 
 		e.logger.Info("block has validator updates", "len", len(abciResponse.ValidatorUpdates))
 		curVSet := e.chain.GetValidatorsByHash(blk.ValidatorsHash())
 		e.logger.Info("current validator set", "len", len(curVSet.Validators), "hash", hex.EncodeToString(curVSet.Hash()))
-		nxtVSet = calcNewValidatorSet(curVSet, abciResponse.ValidatorUpdates, abciResponse.Events)
-		e.logger.Info("next validator set", "len", len(nxtVSet.Validators), "hash", hex.EncodeToString(nxtVSet.Hash()))
+		var calcErr error
+		nxtVSet, calcErr = calcNewValidatorSet(curVSet, abciResponse.ValidatorUpdates, abciResponse.Events)
+		if calcErr != nil {
+			e.logger.Error("failed to calculate new validator set, keeping current set", "err", calcErr)
+			nxtVSet = nil
+		} else {
+			e.logger.Info("next validator set", "len", len(nxtVSet.Validators), "hash", hex.EncodeToString(nxtVSet.Hash()))
+		}
 	} else {
 		nxtVSet = nil
 	}
@@ -203,54 +212,30 @@ func (e *Executor) applyBlock(blk *block.Block, syncingToHeight int64) (appHash 
 	return
 }
 
-func calcNewValidatorSet(vset *cmttypes.ValidatorSet, updates abcitypes.ValidatorUpdates, events []abcitypes.Event) (nxtVSet *cmttypes.ValidatorSet) {
+func calcNewValidatorSet(vset *cmttypes.ValidatorSet, updates abcitypes.ValidatorUpdates, events []abcitypes.Event) (nxtVSet *cmttypes.ValidatorSet, err error) {
 	if updates.Len() <= 0 {
 		return
 	}
 	nxtVSetAdapter := cmn.NewValidatorSetAdapter(vset)
 
-	fmt.Println("before calc new VSET")
-	fmt.Println("VSET: ", hex.EncodeToString(vset.Hash()))
-	for i, v := range vset.Validators {
-		fmt.Println("index ", i, v.Address.String(), v.PubKey.Type(), hex.EncodeToString(v.PubKey.Bytes()))
-	}
-	fmt.Println("--------------------------------------------------")
-
-	// veMap := make(map[string]validatorExtra)
-	// for _, ev := range events {
-	// 	if ev.Type == "ValidatorExtra" {
-	// 		ve := validatorExtra{}
-	// 		for _, attr := range ev.Attributes {
-	// 			switch attr.Key {
-	// 			case "address":
-	// 				ve.Address = common.Address{}
-	// 			case "name":
-	// 				ve.Name = attr.Value
-	// 			case "pubkey":
-	// 				ve.Pubkey, _ = hex.DecodeString(attr.Value)
-	// 			case "ip":
-	// 				ve.IP = attr.Value
-	// 			case "port":
-	// 				ve.Port, _ = strconv.ParseUint(attr.Value, 10, 32)
-	// 			}
-	// 		}
-	// 		veMap[hex.EncodeToString(ve.Pubkey)] = ve
-	// 	}
-	// }
 	for _, update := range updates {
-		pubkey, err := bls12381.NewPublicKeyFromBytes(update.PubKeyBytes)
-		if err != nil {
-			panic(err)
+		pubkey, parseErr := bls12381.NewPublicKeyFromBytes(update.PubKeyBytes)
+		if parseErr != nil {
+			slog.Error("invalid BLS public key in ValidatorUpdate, skipping",
+				"err", parseErr,
+				"pubkey_hex", hex.EncodeToString(update.PubKeyBytes),
+				"pubkey_len", len(update.PubKeyBytes),
+			)
+			err = parseErr
+			continue
 		}
 		if update.Power == 0 {
 			nxtVSetAdapter.DeleteByPubkey(update.PubKeyBytes)
 		} else {
 			v := nxtVSetAdapter.GetByPubkey(update.PubKeyBytes)
-
 			if v == nil {
 				v = &cmttypes.Validator{PubKey: pubkey, VotingPower: update.Power}
 			}
-
 			v.VotingPower = update.Power
 			v.Address = pubkey.Address()
 			nxtVSetAdapter.Upsert(v)
@@ -258,12 +243,6 @@ func calcNewValidatorSet(vset *cmttypes.ValidatorSet, updates abcitypes.Validato
 	}
 
 	nxtVSet = nxtVSetAdapter.ToValidatorSet()
-	fmt.Println("Next VSET: ", hex.EncodeToString(nxtVSet.Hash()))
-	for i, v := range nxtVSet.Validators {
-		fmt.Println("index ", i, v.Address.String(), v.PubKey.Type(), hex.EncodeToString(v.PubKey.Bytes()))
-	}
-	fmt.Println("--------------------------------------------------")
-
 	return
 }
 

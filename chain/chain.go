@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
 	cmtdb "github.com/cometbft/cometbft-db"
@@ -527,6 +528,288 @@ func (c *Chain) GetTrunkTransaction(txID []byte) (cmttypes.Tx, *TxMeta, error) {
 	return tx, meta, nil
 }
 
+// GetTransactionWithResult get transaction and its result by tx hash.
+// This method is used by RPC to implement Tx() query.
+func (c *Chain) GetTransactionWithResult(txHash []byte) (cmttypes.Tx, *abci.ExecTxResult, error) {
+	c.rw.RLock()
+	defer c.rw.RUnlock()
+
+	meta, err := c.getTransactionMeta(txHash, c.bestBlock.ID())
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Get the transaction
+	tx, err := c.getTransaction(meta.BlockID, meta.Index)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Get the FinalizeBlockResponse to get the tx result
+	res, err := loadFinalizeBlockResponse(c.db, meta.BlockID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if meta.Index >= uint64(len(res.TxResults)) {
+		return nil, nil, errors.New("tx index out of range in results")
+	}
+
+	txResult := res.TxResults[meta.Index]
+
+	// Convert v2.ExecTxResult to abci.ExecTxResult
+	abciResult := &abci.ExecTxResult{
+		Code:      txResult.Code,
+		Data:      txResult.Data,
+		Log:       txResult.Log,
+		Info:      txResult.Info,
+		GasWanted: txResult.GasWanted,
+		GasUsed:   txResult.GasUsed,
+		Codespace: txResult.Codespace,
+	}
+
+	return tx, abciResult, nil
+}
+
+// TxSearchResult represents a transaction search result
+type TxSearchResult struct {
+	Tx     cmttypes.Tx
+	Height uint32
+	Index  uint32
+	Result *abci.ExecTxResult
+}
+
+// SearchTxs searches for transactions matching the query.
+// This is a simple implementation that scans blocks from newest to oldest.
+// Query format: "tx.height=N" or "message.type='xxx'" or simple substring match on events.
+func (c *Chain) SearchTxs(query string, page, perPage int) ([]*TxSearchResult, int, error) {
+	c.rw.RLock()
+	defer c.rw.RUnlock()
+
+	var results []*TxSearchResult
+	bestNum := c.bestBlock.Number()
+
+	// Simple query parsing
+	// Support: tx.height=N, tx.hash=xxx, or simple text search in events
+	var heightFilter *uint32
+	var hashFilter []byte
+	var textFilter string
+
+	// Parse query
+	if len(query) > 0 {
+		// Check for height filter
+		if len(query) > 10 && query[:9] == "tx.height=" {
+			var h uint32
+			if _, err := fmt.Sscanf(query[9:], "%d", &h); err == nil {
+				heightFilter = &h
+			}
+		}
+		// Check for hash filter
+		if len(query) > 9 && query[:9] == "tx.hash=0x" {
+			hashFilter = []byte(query[9:])
+		}
+		// Otherwise use as text filter
+		if heightFilter == nil && hashFilter == nil {
+			textFilter = query
+		}
+	}
+
+	// Iterate through blocks (newest first)
+	maxBlocksToScan := uint32(1000) // Limit scanning to avoid infinite loops
+	startHeight := bestNum
+	if heightFilter != nil && *heightFilter < startHeight {
+		startHeight = *heightFilter
+	}
+
+	for height := startHeight; height > 0 && uint32(startHeight-height) < maxBlocksToScan; height-- {
+		// Get block ID
+		blockID, err := loadBlockHash(c.db, height)
+		if err != nil {
+			continue
+		}
+
+		// Get block
+		blk, err := c.getBlock(blockID)
+		if err != nil {
+			continue
+		}
+
+		// Get finalize block response for tx results
+		res, err := loadFinalizeBlockResponse(c.db, blockID)
+		if err != nil {
+			continue
+		}
+
+		// Check each transaction
+		for i, tx := range blk.Transactions() {
+			txHash := tx.Hash()
+
+			// Apply hash filter
+			if hashFilter != nil {
+				if string(txHash) != string(hashFilter) {
+					continue
+				}
+			}
+
+			// Apply text filter
+			if textFilter != "" {
+				match := false
+				// Check in tx data
+				if strings.Contains(string(tx), textFilter) {
+					match = true
+				}
+				// Check in tx result
+				if res != nil && i < len(res.TxResults) {
+					result := res.TxResults[i]
+					if strings.Contains(result.Log, textFilter) {
+						match = true
+					}
+					// Check events
+					for _, event := range result.Events {
+						if strings.Contains(event.Type, textFilter) {
+							match = true
+							break
+						}
+						for _, attr := range event.Attributes {
+							if strings.Contains(string(attr.Key), textFilter) || strings.Contains(string(attr.Value), textFilter) {
+								match = true
+								break
+							}
+						}
+						if match {
+							break
+						}
+					}
+				}
+				if !match {
+					continue
+				}
+			}
+
+			// Get tx result
+			var txResult *abci.ExecTxResult
+			if res != nil && i < len(res.TxResults) {
+				r := res.TxResults[i]
+				txResult = &abci.ExecTxResult{
+					Code:      r.Code,
+					Data:      r.Data,
+					Log:       r.Log,
+					Info:      r.Info,
+					GasWanted: r.GasWanted,
+					GasUsed:   r.GasUsed,
+					Codespace: r.Codespace,
+				}
+			}
+
+			results = append(results, &TxSearchResult{
+				Tx:     tx,
+				Height: height,
+				Index:  uint32(i),
+				Result: txResult,
+			})
+
+			// If we've found enough, stop
+			if len(results) >= page*perPage+perPage {
+				return results, len(results), nil
+			}
+		}
+	}
+
+	return results, len(results), nil
+}
+
+// BlockSearchResult represents a block search result
+type BlockSearchResult struct {
+	Block   *block.Block
+	Height  uint32
+	BlockID types.Bytes32
+}
+
+// SearchBlocks searches for blocks matching the query.
+// Simple implementation that supports height filtering.
+func (c *Chain) SearchBlocks(query string, page, perPage int) ([]*BlockSearchResult, int, error) {
+	c.rw.RLock()
+	defer c.rw.RUnlock()
+
+	var results []*BlockSearchResult
+	bestNum := c.bestBlock.Number()
+
+	// Simple query parsing - support "height=N" or range
+	var minHeight, maxHeight uint32
+	hasHeightFilter := false
+
+	if len(query) > 0 {
+		// Check for height range: "height >= X AND height <= Y"
+		if strings.Contains(query, "height >=") {
+			var h uint32
+			if _, err := fmt.Sscanf(query[strings.Index(query, "height >=")+10:], "%d", &h); err == nil {
+				minHeight = h
+				hasHeightFilter = true
+			}
+		}
+		if strings.Contains(query, "height <=") {
+			var h uint32
+			if _, err := fmt.Sscanf(query[strings.Index(query, "height <=")+10:], "%d", &h); err == nil {
+				maxHeight = h
+			}
+		}
+		// Single height: "height=N"
+		if !hasHeightFilter && strings.Contains(query, "height=") {
+			var h uint32
+			idx := strings.Index(query, "height=")
+			if _, err := fmt.Sscanf(query[idx+7:], "%d", &h); err == nil {
+				minHeight = h
+				maxHeight = h
+				hasHeightFilter = true
+			}
+		}
+	}
+
+	// Determine scan range
+	startHeight := bestNum
+	endHeight := uint32(1)
+	if hasHeightFilter {
+		if minHeight > 0 && minHeight < startHeight {
+			startHeight = minHeight
+		}
+		if maxHeight > 0 && maxHeight < startHeight {
+			startHeight = maxHeight
+		}
+	}
+
+	// Scan blocks from newest to oldest
+	maxBlocksToScan := uint32(1000)
+	for height := startHeight; height >= endHeight && uint32(startHeight-height) < maxBlocksToScan; height-- {
+		// Skip if outside height range
+		if hasHeightFilter && (height < minHeight || (maxHeight > 0 && height > maxHeight)) {
+			continue
+		}
+
+		blockID, err := loadBlockHash(c.db, height)
+		if err != nil {
+			continue
+		}
+
+		blk, err := c.getBlock(blockID)
+		if err != nil {
+			continue
+		}
+
+		results = append(results, &BlockSearchResult{
+			Block:   blk,
+			Height:  height,
+			BlockID: blockID,
+		})
+
+		// If we've found enough, stop
+		if len(results) >= page*perPage+perPage {
+			break
+		}
+	}
+
+	return results, len(results), nil
+}
+
 func (c *Chain) isTrunk(header *block.Header) bool {
 	bestHeader := c.bestBlock.Header()
 	if header.Number() < bestHeader.Number() {
@@ -947,6 +1230,82 @@ func (c *Chain) GetFinalizeBlockResponse(blockID types.Bytes32) (*v2.FinalizeBlo
 
 func (c *Chain) SaveFinalizeBlockResponse(blockID types.Bytes32, res *v2.FinalizeBlockResponse) error {
 	return saveFinalizeBlockResponse(c.db, blockID, res)
+}
+
+// SaveFinalizeBlockResponseFromAbci converts abci FinalizeBlockResponse to v2 and persists.
+func (c *Chain) SaveFinalizeBlockResponseFromAbci(blockID types.Bytes32, res *abci.FinalizeBlockResponse) error {
+	v2res := abciFinalizeBlockResponseToV2(res)
+	return saveFinalizeBlockResponse(c.db, blockID, v2res)
+}
+
+// abciFinalizeBlockResponseToV2 将 abci (v1) 转为 v2，统一使用 v2。
+func abciFinalizeBlockResponseToV2(res *abci.FinalizeBlockResponse) *v2.FinalizeBlockResponse {
+	if res == nil {
+		return nil
+	}
+	out := &v2.FinalizeBlockResponse{AppHash: res.AppHash}
+	if len(res.Events) > 0 {
+		out.Events = make([]v2.Event, len(res.Events))
+		for i, e := range res.Events {
+			out.Events[i] = v2.Event{
+				Type:       e.Type,
+				Attributes: abciEventAttributesToV2(e.Attributes),
+			}
+		}
+	}
+	if len(res.TxResults) > 0 {
+		out.TxResults = make([]*v2.ExecTxResult, len(res.TxResults))
+		for i, r := range res.TxResults {
+			out.TxResults[i] = &v2.ExecTxResult{
+				Code:      r.Code,
+				Data:      r.Data,
+				Log:       r.Log,
+				Info:      r.Info,
+				GasWanted: r.GasWanted,
+				GasUsed:   r.GasUsed,
+				Codespace: r.Codespace,
+			}
+			if len(r.Events) > 0 {
+				out.TxResults[i].Events = make([]v2.Event, len(r.Events))
+				for j, e := range r.Events {
+					out.TxResults[i].Events[j] = v2.Event{
+						Type:       e.Type,
+						Attributes: abciEventAttributesToV2(e.Attributes),
+					}
+				}
+			}
+		}
+	}
+	if len(res.ValidatorUpdates) > 0 {
+		out.ValidatorUpdates = make([]v2.ValidatorUpdate, len(res.ValidatorUpdates))
+		for i, u := range res.ValidatorUpdates {
+			out.ValidatorUpdates[i] = v2.ValidatorUpdate{
+				Power:       u.Power,
+				PubKeyBytes: u.PubKeyBytes,
+				PubKeyType:  u.PubKeyType,
+			}
+		}
+	}
+	// ConsensusParamUpdates: abci 用 types/v2，v2.FinalizeBlockResponse 也用 types/v2，可直接赋值
+	if res.ConsensusParamUpdates != nil {
+		out.ConsensusParamUpdates = res.ConsensusParamUpdates
+	}
+	return out
+}
+
+func abciEventAttributesToV2(attrs []abci.EventAttribute) []v2.EventAttribute {
+	if len(attrs) == 0 {
+		return nil
+	}
+	out := make([]v2.EventAttribute, len(attrs))
+	for i, a := range attrs {
+		out[i] = v2.EventAttribute{
+			Key:   a.Key,
+			Value: a.Value,
+			Index: a.Index,
+		}
+	}
+	return out
 }
 
 func (c *Chain) GetQCForBlock(blkID types.Bytes32) (*block.QuorumCert, error) {

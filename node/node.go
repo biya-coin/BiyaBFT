@@ -11,8 +11,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/beevik/ntp"
@@ -40,6 +42,7 @@ import (
 	"github.com/meterio/supernova/txpool"
 	"github.com/meterio/supernova/types"
 	"github.com/pkg/errors"
+	"github.com/spf13/viper"
 )
 
 var (
@@ -112,6 +115,27 @@ type Node struct {
 	proxyApp cmtproxy.AppConns
 }
 
+// Chain returns the chain for block/chain data access (e.g. RPC Local client).
+func (n *Node) Chain() *chain.Chain { return n.chain }
+
+// TxPool returns the transaction pool (e.g. for BroadcastTx, Mempool queries).
+func (n *Node) TxPool() *txpool.TxPool { return n.txPool }
+
+// ProxyApp returns the ABCI proxy connections (Query, Mempool, Consensus).
+func (n *Node) ProxyApp() cmtproxy.AppConns { return n.proxyApp }
+
+// Communicator returns the communicator for block events (e.g. Subscribe).
+func (n *Node) Communicator() *rpc.Communicator { return n.communicator }
+
+// GenesisDoc returns the genesis document.
+func (n *Node) GenesisDoc() *cmttypes.GenesisDoc { return n.genesisDoc }
+
+// Pacemaker returns the consensus pacemaker.
+func (n *Node) Pacemaker() *consensus.Pacemaker { return n.pacemaker }
+
+// P2P returns the P2P service for peer information (e.g. NetInfo RPC).
+func (n *Node) P2P() p2p.P2P { return n.p2pSrv }
+
 func NewNode(
 	ctx context.Context,
 	config *cmtcfg.Config,
@@ -159,24 +183,15 @@ func NewNode(
 	}
 
 	txPool := txpool.New(chain, txpool.DefaultTxPoolOptions)
-	defer func() { slog.Info("closing tx pool..."); txPool.Close() }()
 
-	var BootstrapNodes []string
-	// BootstrapNodes = append(BootstrapNodes, "enr:-MK4QGZ6np5N03sJeQPI1ep3L_13ckTJQ5TXcj81mk_UV3oeA-mMtcw7JViYP3cgSBmvxQV74MRTTfUNM5TUqr_D2BiGAZRynhEfh2F0dG5ldHOIAAAAAAAAAACEZXRoMpBLDKxQAQAAAAAiAQAAAAAAgmlkgnY0gmlwhKwfWYOJc2VjcDI1NmsxoQMkZ9waUAVNMFXOY3B5VlDTqLZHqb4MqKOFXSvh-k4dUohzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // nova-3
-	// BootstrapNodes = append(BootstrapNodes, "enr:-MK4QM98ZZL8E3Bx64wPtz49hJ8paIFH8Rv5QCvPTOLJeBYfSobjpjqMfrLODfwiB5_SoWh9Yo_5dvBZ2NLNilgEI9mGAZXZi7yHh2F0dG5ldHOIAAAAAAAAAACEZXRoMpAWc8IXAQAAAAAiAQAAAAAAgmlkgnY0gmlwhKwfEoiJc2VjcDI1NmsxoQLQJYjiRjexHE-A2FdO0PHyZUhaFYpHhDef1XVZZC5qaohzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // nova-2
-	// BootstrapNodes = append(BootstrapNodes, "enr:-MK4QGaHtB-0kwFShAZ3lfLx0HxM-gUX3pPwS6UQkOh98dZyJopO9xFfRXLJpeg-NVVgEDjIcHOMDo2w2usa1sA2qXaGAZXZi7uFh2F0dG5ldHOIAAAAAAAAAACEZXRoMpAWc8IXAQAAAAAiAQAAAAAAgmlkgnY0gmlwhKwfHXiJc2VjcDI1NmsxoQPxAUSjJt5Vza3kwhv_XtDmQKCrI2SSjjQFrFkaB_ZskohzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // nova-1
-	BootstrapNodes = append(BootstrapNodes, "enr:-MK4QFGVs_TSw_GfRuAxg76f05CsCXR1OoGX30zlaxvlrYptBdOiTZpTSt9ZxXFSGU5nvzkaJe3clIxGPuYl_Dvuf1iGAZhoA3sAh2F0dG5ldHOIAAAAAAAAAACEZXRoMpDC2eMlAQAAAAAiAQAAAAAAgmlkgnY0gmlwhAqKD_eJc2VjcDI1NmsxoQPPS9LS1HeU3LMS5WU1Zi_ePJihE2oqw1mIG6fuq7kajohzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // super-1
-	BootstrapNodes = append(BootstrapNodes, "enr:-MK4QP3nEwXgKz7hUGxg02X7ssAS_PvALfYKhmEbd8mLibn2TUfIe0lQzIZQ4ikG6mNt1kELsLYJLSToHk6NJvdcpXCGAZhoA3wch2F0dG5ldHOIAAAAAAAAAACEZXRoMpCR0elIAQAAAAAiAQAAAAAAgmlkgnY0gmlwhAqKD_iJc2VjcDI1NmsxoQKfjpkMQm9CuuRLkE_r2VoH7wtlz2HQwr4h7t6rt2gt84hzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // super-2
-
-	// BootstrapNodes = append(BootstrapNodes, "enr:-MK4QMWkLjGkpPB2iP84pdrBqyB-SjJiodPu0oLYQLVLXhgmPMeqN8Nk24Al9mElveJXJFaZUkjwWHAsz1oJN_A-hYeGAZSlsvkzh2F0dG5ldHOIAAAAAAAAAACEZXRoMpAWc8IXAQAAAAAiAQAAAAAAgmlkgnY0gmlwhKwfEoiJc2VjcDI1NmsxoQMog1olklG4kSkaiGepYTRoy0OseZus8-cOKqzsOqlkBIhzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // simd nova2
-	// BootstrapNodes = append(BootstrapNodes, "enr:-MK4QGD2XTHBtQ_r17bA3MHvUqrhVfKvKKqIeDN3sD-YVhkSM2j6oiv2fKHTK_5lvCn6OPa-WHZ3m9Ao1C6oz9P6i9KGAZSlsvidh2F0dG5ldHOIAAAAAAAAAACEZXRoMpAWc8IXAQAAAAAiAQAAAAAAgmlkgnY0gmlwhKwfHXiJc2VjcDI1NmsxoQOucvYee5KxdMkhPqF4W8KGJGSuOhqzk59ZJiPyogCn6ohzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // simd nova1
+	bootstrapNodes := loadBootstrapNodes(config.RootDir)
 
 	geneBlock, err := chain.GetTrunkBlock(0)
 	if err != nil {
 		return nil, err
 	}
 
-	p2pSrv := newP2PService(ctx, config, BootstrapNodes, geneBlock)
+	p2pSrv := newP2PService(ctx, config, bootstrapNodes, geneBlock)
 
 	rpcServer := rpc.NewRPCServer(p2pSrv, chain, txPool)
 	rpcServer.Start(ctx)
@@ -188,7 +203,14 @@ func NewNode(
 
 	pubkey, err := privValidator.GetPubKey()
 
+	// Derive API address from CometBFT RPC config, default to :26657
 	apiAddr := ":26657"
+	if config.RPC.ListenAddress != "" {
+		// config.RPC.ListenAddress is e.g. "tcp://127.0.0.1:26657" or "tcp://127.0.0.1:26757"
+		if idx := strings.LastIndex(config.RPC.ListenAddress, ":"); idx >= 0 {
+			apiAddr = config.RPC.ListenAddress[idx:] // e.g. ":26757"
+		}
+	}
 	chainId, err := strconv.ParseUint(genDoc.ChainID, 10, 64)
 	apiServer := api.NewAPIServer(proxyApp.Query(), apiAddr, chainId, config.BaseConfig.Version, chain, txPool, pacemaker, pubkey.Bytes(), p2pSrv)
 
@@ -229,6 +251,43 @@ func NewNode(
 	return node, nil
 }
 
+// loadBootstrapNodes reads P2P bootstrap nodes from config/supernova.toml.
+// Returns nil or empty slice if file is missing or bootstrap_nodes is empty (single-node mode).
+func loadBootstrapNodes(rootDir string) []string {
+	cfgPath := filepath.Join(rootDir, "config", "supernova.toml")
+	v := viper.New()
+	v.SetConfigFile(cfgPath)
+	v.SetConfigType("toml")
+	if err := v.ReadInConfig(); err != nil {
+		slog.Debug("Failed to read supernova.toml", "path", cfgPath, "err", err)
+		return nil
+	}
+	raw := v.Get("p2p.bootstrap_nodes")
+	if raw == nil {
+		slog.Debug("p2p.bootstrap_nodes not found in config")
+		return nil
+	}
+	slog.Debug("Found p2p.bootstrap_nodes in config", "type", fmt.Sprintf("%T", raw))
+	// viper may return []interface{} for toml arrays
+	switch arr := raw.(type) {
+	case []string:
+		slog.Info("Loaded bootstrap nodes (string array)", "count", len(arr), "nodes", arr)
+		return arr
+	case []interface{}:
+		out := make([]string, 0, len(arr))
+		for _, x := range arr {
+			if s, ok := x.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		slog.Info("Loaded bootstrap nodes (interface array)", "count", len(out), "nodes", out)
+		return out
+	default:
+		slog.Warn("Unexpected type for p2p.bootstrap_nodes", "type", fmt.Sprintf("%T", arr))
+		return nil
+	}
+}
+
 func createAndStartProxyAppConns(clientCreator cmtproxy.ClientCreator, metrics *cmtproxy.Metrics) (proxy.AppConns, error) {
 	proxyApp := proxy.NewAppConns(clientCreator, metrics)
 	if err := proxyApp.Start(); err != nil {
@@ -238,10 +297,42 @@ func createAndStartProxyAppConns(clientCreator cmtproxy.ClientCreator, metrics *
 }
 
 func newP2PService(ctx context.Context, config *cmtcfg.Config, bootstrapNodes []string, geneBlock *block.Block) *p2p.Service {
+	// Derive libp2p ports from the CometBFT P2P listen address to avoid conflicts
+	// when multiple nodes run on the same host.
+	// CometBFT P2P port: e.g. 26656, 26756, 26856, 26956
+	// libp2p TCP/QUIC port = cmt_p2p_port + 1000  → 27656, 27756, ...
+	// libp2p UDP/discv5 port = cmt_p2p_port + 2000 → 28656, 28756, ...
+	p2pListenAddr := config.P2P.ListenAddress // e.g. "tcp://0.0.0.0:26656"
+	tcpPort := 13000
+	udpPort := 12000
+	if p2pListenAddr != "" {
+		// Extract port from the address (last ':' segment)
+		if idx := strings.LastIndex(p2pListenAddr, ":"); idx >= 0 {
+			if portStr := p2pListenAddr[idx+1:]; portStr != "" {
+				if p, err := strconv.Atoi(portStr); err == nil {
+					tcpPort = p + 1000
+					udpPort = p + 2000
+				}
+			}
+		}
+	}
+	slog.Info("Starting libp2p P2P service", "tcpPort", tcpPort, "udpPort", udpPort,
+		"bootstrapCount", len(bootstrapNodes))
+
+	// Parse bootstrap nodes for both discv5 and libp2p static peers
+	discv5Addrs := p2p.ParseBootStrapAddrs(bootstrapNodes)
+	staticPeers := p2p.ParseMultiAddrs(bootstrapNodes)
+
+	slog.Info("Parsed bootstrap nodes",
+		"discv5Count", len(discv5Addrs),
+		"staticPeerCount", len(staticPeers),
+		"discv5Addrs", discv5Addrs,
+		"staticPeers", staticPeers)
+
 	svc, err := p2p.NewService(ctx, &p2p.Config{
-		NoDiscovery: false,
-		// StaticPeers:          slice.SplitCommaSeparated(cliCtx.StringSlice(cmd.StaticPeers.Name)),
-		Discv5BootStrapAddrs: p2p.ParseBootStrapAddrs(bootstrapNodes),
+		NoDiscovery:          false,
+		StaticPeers:          staticPeers,
+		Discv5BootStrapAddrs: discv5Addrs,
 		// RelayNodeAddr:        cliCtx.String(cmd.RelayNode.Name),
 		DataDir: config.RootDir,
 		// LocalIP:              cliCtx.String(cmd.P2PIP.Name),
@@ -250,9 +341,9 @@ func newP2PService(ctx context.Context, config *cmtcfg.Config, bootstrapNodes []
 		PrivateKey:   "",
 		StaticPeerID: true,
 		// MetaDataDir:          cliCtx.String(cmd.P2PMetadata.Name),
-		QUICPort:  13000,
-		TCPPort:   13000,
-		UDPPort:   12000,
+		QUICPort:  uint(tcpPort),
+		TCPPort:   uint(tcpPort),
+		UDPPort:   uint(udpPort),
 		MaxPeers:  uint(config.P2P.MaxNumInboundPeers),
 		QueueSize: 1000,
 		// AllowListCIDR:        cliCtx.String(cmd.P2PAllowList.Name),
@@ -262,6 +353,7 @@ func newP2PService(ctx context.Context, config *cmtcfg.Config, bootstrapNodes []
 		// DB:            n.mainDB,
 	}, geneBlock.NanoTimestamp(), geneBlock.NextValidatorsHash())
 	if err != nil {
+		slog.Error("p2p.NewService failed", "err", err)
 		return nil
 	}
 	pubsub.WithSubscriptionFilter(pubsub.NewAllowlistSubscriptionFilter(p2p.ConsensusTopic))

@@ -133,6 +133,34 @@ func (h *Handshaker) ReplayBlocks(
 			return nil, err
 		}
 
+		// Instead of calling Commit() after InitChain, we'll call FinalizeBlock at height 1
+		// with an empty block to properly persist the genesis state.
+		// This is the correct flow for ABCI v2 (FinalizeBlock).
+		fmt.Println("DEBUG: About to call FinalizeBlock at height 1 to persist genesis state")
+		finalizeResp, err := proxyApp.Consensus().FinalizeBlock(context.TODO(), &abci.FinalizeBlockRequest{
+			Height: 1,
+			Time:   h.genDoc.GenesisTime,
+			Hash:   res.AppHash,
+		})
+		if err != nil {
+			h.logger.Error("DEBUG: FinalizeBlock at height 1 failed", "err", err)
+			fmt.Printf("DEBUG: FinalizeBlock at height 1 failed: %v\n", err)
+		} else {
+			h.logger.Info("DEBUG: Finalized genesis block")
+			fmt.Printf("DEBUG: Finalized genesis block at height 1, appHash: %X\n", finalizeResp.AppHash)
+		}
+
+		// Now commit the genesis block
+		fmt.Println("DEBUG: About to call Commit after FinalizeBlock")
+		commitResp, err := proxyApp.Consensus().Commit(context.TODO())
+		if err != nil {
+			h.logger.Error("DEBUG: Commit after FinalizeBlock failed", "err", err)
+			fmt.Printf("DEBUG: Commit failed: %v\n", err)
+		} else {
+			h.logger.Info("DEBUG: Committed genesis block", "retainHeight", commitResp.RetainHeight)
+			fmt.Printf("DEBUG: Committed genesis block, retainHeight: %v\n", commitResp.RetainHeight)
+		}
+
 		appHash = res.AppHash
 
 		gene := genesis.NewGenesis(h.genDoc, res.Validators)

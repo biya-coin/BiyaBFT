@@ -3,23 +3,33 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"log"
 
 	"github.com/cockroachdb/pebble"
 	abcitypes "github.com/cometbft/cometbft/v2/abci/types"
+	cmttypes "github.com/cometbft/cometbft/v2/types"
 )
+
+// ValidatorInfo holds runtime validator public key info derived from genesis.
+type ValidatorInfo struct {
+	PubKeyBytes []byte
+	Power       int64
+	Name        string
+}
 
 type KVStoreApplication struct {
 	db           *pebble.DB
 	onGoingBatch *pebble.Batch
+	validators   []ValidatorInfo // loaded from genesis, used for real validator updates
 }
 
 var _ abcitypes.Application = (*KVStoreApplication)(nil)
 
-func NewKVStoreApplication(db *pebble.DB) *KVStoreApplication {
-	return &KVStoreApplication{db: db}
+// NewKVStoreApplication creates a new KVStore app.
+// genesisValidators should be populated from the genesis doc's validator set.
+func NewKVStoreApplication(db *pebble.DB, genesisValidators []ValidatorInfo) *KVStoreApplication {
+	return &KVStoreApplication{db: db, validators: genesisValidators}
 }
 
 func (app *KVStoreApplication) isValid(tx []byte) uint32 {
@@ -73,8 +83,7 @@ func (app *KVStoreApplication) ProcessProposal(_ context.Context, proposal *abci
 
 func (app *KVStoreApplication) FinalizeBlock(_ context.Context, req *abcitypes.FinalizeBlockRequest) (*abcitypes.FinalizeBlockResponse, error) {
 	var txs = make([]*abcitypes.ExecTxResult, len(req.Txs))
-	var updates = make([]abcitypes.ValidatorUpdate, 0)
-	var events = make([]abcitypes.Event, 0)
+	var updates []abcitypes.ValidatorUpdate
 
 	app.onGoingBatch = app.db.NewBatch()
 	defer app.onGoingBatch.Close()
@@ -109,32 +118,27 @@ func (app *KVStoreApplication) FinalizeBlock(_ context.Context, req *abcitypes.F
 		}
 	}
 
-	nova2PubkeyHex := "9016f8eba9f86d6a9bd880b50925b28d5dea35e9fa6de82da4a8f355ccfc68bbbe1f9374b97f67ce3e3c0689c9fa075c"
-	if req.Height == 6 {
-		pubkey, _ := hex.DecodeString(nova2PubkeyHex)
-		updates = append(updates, abcitypes.ValidatorUpdate{
-			Power:       10,
-			PubKeyBytes: pubkey,
-			PubKeyType:  "bls12-381.pubkey",
-		})
-		events = append(events, abcitypes.Event{
-			Type: "ValidatorExtra",
-			Attributes: []abcitypes.EventAttribute{
-				{Key: "pubkey", Value: nova2PubkeyHex},
-				{Key: "name", Value: "nova-2"},
-				{Key: "ip", Value: "52.22.222.17"},
-				{Key: "port", Value: "8670"},
-			},
-		})
-	}
-
-	if req.Height == 20 {
-		pubkey, _ := hex.DecodeString(nova2PubkeyHex)
-		updates = append(updates, abcitypes.ValidatorUpdate{
-			Power:       0,
-			PubKeyBytes: pubkey,
-			PubKeyType:  "bls12-381.pubkey",
-		})
+	// Demonstrate real validator updates using public keys loaded from genesis.
+	// At height 10: reduce voting power of the last validator to 5 (using real genesis key).
+	// At height 20: restore voting power of the last validator to original (using real genesis key).
+	if len(app.validators) > 0 {
+		last := app.validators[len(app.validators)-1]
+		switch req.Height {
+		case 10:
+			log.Printf("Height %d: reducing voting power of validator '%s' to 5", req.Height, last.Name)
+			updates = append(updates, abcitypes.ValidatorUpdate{
+				PubKeyBytes: last.PubKeyBytes,
+				PubKeyType:  "bls12-381.pubkey",
+				Power:       5,
+			})
+		case 20:
+			log.Printf("Height %d: restoring voting power of validator '%s' to %d", req.Height, last.Name, last.Power)
+			updates = append(updates, abcitypes.ValidatorUpdate{
+				PubKeyBytes: last.PubKeyBytes,
+				PubKeyType:  "bls12-381.pubkey",
+				Power:       last.Power,
+			})
+		}
 	}
 
 	if err := app.onGoingBatch.Commit(pebble.Sync); err != nil {
@@ -144,7 +148,6 @@ func (app *KVStoreApplication) FinalizeBlock(_ context.Context, req *abcitypes.F
 	return &abcitypes.FinalizeBlockResponse{
 		TxResults:        txs,
 		ValidatorUpdates: updates,
-		Events:           events,
 	}, nil
 }
 
@@ -175,4 +178,19 @@ func (app *KVStoreApplication) ExtendVote(_ context.Context, extend *abcitypes.E
 
 func (app *KVStoreApplication) VerifyVoteExtension(_ context.Context, verify *abcitypes.VerifyVoteExtensionRequest) (*abcitypes.VerifyVoteExtensionResponse, error) {
 	return &abcitypes.VerifyVoteExtensionResponse{}, nil
+}
+
+// loadValidatorsFromGenesis extracts validator info (public key bytes + power + name)
+// from a CometBFT GenesisDoc. This allows the application to use real, verified
+// validator public keys rather than hardcoded test values.
+func loadValidatorsFromGenesis(genDoc *cmttypes.GenesisDoc) []ValidatorInfo {
+	infos := make([]ValidatorInfo, 0, len(genDoc.Validators))
+	for _, v := range genDoc.Validators {
+		infos = append(infos, ValidatorInfo{
+			PubKeyBytes: v.PubKey.Bytes(),
+			Power:       v.Power,
+			Name:        v.Name,
+		})
+	}
+	return infos
 }

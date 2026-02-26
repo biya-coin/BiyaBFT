@@ -13,6 +13,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/cometbft/cometbft/v2/privval"
 	"github.com/cometbft/cometbft/v2/proxy"
+	cmttypes "github.com/cometbft/cometbft/v2/types"
 	"golang.org/x/sync/errgroup"
 
 	cfg "github.com/cometbft/cometbft/v2/config"
@@ -55,7 +56,10 @@ func main() {
 	if err := config.ValidateBasic(); err != nil {
 		slog.Error("Invalid configuration data", "err", err)
 	}
-	dbPath := filepath.Join(homeDir, "badger")
+	// config.SetRoot sets RootDir but Viper/config keys might already be loaded with defaults
+	config.SetRoot(homeDir)
+
+	dbPath := filepath.Join(homeDir, "appdb")
 	db, err := pebble.Open(dbPath, &pebble.Options{})
 
 	if err != nil {
@@ -67,7 +71,19 @@ func main() {
 		}
 	}()
 
-	app := NewKVStoreApplication(db)
+	// Load genesis doc to extract real validator public keys for the sample app.
+	// This ensures ValidatorUpdates in FinalizeBlock use verified genesis keys,
+	// not hardcoded test values.
+	var genesisValidators []ValidatorInfo
+	genDoc, genErr := cmttypes.GenesisDocFromFile(config.GenesisFile())
+	if genErr != nil {
+		slog.Warn("Could not load genesis doc for ValidatorInfo; sample app will not send ValidatorUpdates", "err", genErr)
+	} else {
+		genesisValidators = loadValidatorsFromGenesis(genDoc)
+		slog.Info("Loaded genesis validators for sample app", "count", len(genesisValidators))
+	}
+
+	app := NewKVStoreApplication(db, genesisValidators)
 
 	pv := privval.LoadFilePV(
 		config.PrivValidatorKeyFile(),
