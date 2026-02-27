@@ -11,13 +11,15 @@ import (
 	v2 "github.com/cometbft/cometbft/api/cometbft/abci/v2"
 	abci "github.com/cometbft/cometbft/v2/abci/types"
 	abcitypes "github.com/cometbft/cometbft/v2/abci/types"
-	"github.com/cometbft/cometbft/v2/crypto/bls12381"
+	cmtcrypto "github.com/cometbft/cometbft/v2/crypto"
+	cryptoencoding "github.com/cometbft/cometbft/v2/crypto/encoding"
 	cmtproxy "github.com/cometbft/cometbft/v2/proxy"
 	cmttypes "github.com/cometbft/cometbft/v2/types"
 	"github.com/meterio/supernova/block"
 	"github.com/meterio/supernova/chain"
 	cmn "github.com/meterio/supernova/libs/common"
 	"github.com/meterio/supernova/txpool"
+	"github.com/meterio/supernova/types"
 )
 
 var (
@@ -45,8 +47,16 @@ func (e *Executor) PrepareProposal(parent *block.DraftBlock, proposerIndex int, 
 
 	evSize := int64(0)
 	vset := e.chain.GetValidatorsByHash(parent.ProposedBlock.NextValidatorsHash())
+	if vset == nil {
+		return nil, fmt.Errorf("validator set is nil for hash %x", parent.ProposedBlock.NextValidatorsHash())
+	}
 	maxDataBytes := cmttypes.MaxDataBytes(maxBytes, evSize, vset.Size())
 	proposerAddr, validator := vset.GetByIndex(int32(proposerIndex))
+
+	var lastCommitVotes []v2.ExtendedVoteInfo
+	if validator != nil {
+		lastCommitVotes = []v2.ExtendedVoteInfo{{Validator: cmttypes.TM2PB.Validator(validator)}}
+	}
 
 	executables := e.txPool.Executables()
 	txs := make([][]byte, 0)
@@ -57,7 +67,7 @@ func (e *Executor) PrepareProposal(parent *block.DraftBlock, proposerIndex int, 
 	return e.proxyApp.PrepareProposal(context.TODO(), &v2.PrepareProposalRequest{
 		MaxTxBytes:         maxDataBytes,
 		Txs:                txs,
-		LocalLastCommit:    v2.ExtendedCommitInfo{Round: round, Votes: []v2.ExtendedVoteInfo{{Validator: cmttypes.TM2PB.Validator(validator)}}},
+		LocalLastCommit:    v2.ExtendedCommitInfo{Round: round, Votes: lastCommitVotes},
 		Misbehavior:        make([]v2.Misbehavior, 0), // FIXME: track the misbehavior and preppare the evidence
 		Height:             int64(parent.Height) + 1,
 		Time:               time.Now(),
@@ -194,7 +204,12 @@ func (e *Executor) applyBlock(blk *block.Block, syncingToHeight int64) (appHash 
 		e.logger.Info("block has validator updates", "len", len(abciResponse.ValidatorUpdates))
 		curVSet := e.chain.GetValidatorsByHash(blk.ValidatorsHash())
 		e.logger.Info("current validator set", "len", len(curVSet.Validators), "hash", hex.EncodeToString(curVSet.Hash()))
-		nxtVSet = calcNewValidatorSet(curVSet, abciResponse.ValidatorUpdates, abciResponse.Events)
+		var calcErr error
+		nxtVSet, calcErr = calcNewValidatorSet(curVSet, abciResponse.ValidatorUpdates, abciResponse.Events)
+		if calcErr != nil {
+			e.logger.Error("calc new validator set failed", "err", calcErr)
+			return nil, nil, calcErr
+		}
 		e.logger.Info("next validator set", "len", len(nxtVSet.Validators), "hash", hex.EncodeToString(nxtVSet.Hash()))
 	} else {
 		nxtVSet = nil
@@ -203,44 +218,35 @@ func (e *Executor) applyBlock(blk *block.Block, syncingToHeight int64) (appHash 
 	return
 }
 
-func calcNewValidatorSet(vset *cmttypes.ValidatorSet, updates abcitypes.ValidatorUpdates, events []abcitypes.Event) (nxtVSet *cmttypes.ValidatorSet) {
+// normalizeValidatorPubKeyType 将应用层使用的公钥类型名映射为 CometBFT codec 接受的 KeyType（如 "bls12-381.pubkey" -> "bls12_381"）。
+func normalizeValidatorPubKeyType(pubKeyType string) string {
+	switch pubKeyType {
+	case "bls12-381.pubkey", "cometbft/PubKeyBls12_381":
+		return "bls12_381"
+	}
+	return pubKeyType
+}
+
+// decodeValidatorPubKey 解析 ValidatorUpdate 中的公钥。支持 BLS 两种格式：48 字节（Prysm/应用）与 96 字节（CometBFT）。
+func decodeValidatorPubKey(update abcitypes.ValidatorUpdate) (cmtcrypto.PubKey, error) {
+	pkType := normalizeValidatorPubKeyType(update.PubKeyType)
+	// 应用可能返回 48 字节 BLS（Prysm 格式），CometBFT codec 仅支持 96 字节，此处用 types.BLSPubKey 兼容 48 字节
+	if pkType == "bls12_381" && len(update.PubKeyBytes) == 48 {
+		return types.BLSPubKey(update.PubKeyBytes), nil
+	}
+	return cryptoencoding.PubKeyFromTypeAndBytes(pkType, update.PubKeyBytes)
+}
+
+func calcNewValidatorSet(vset *cmttypes.ValidatorSet, updates abcitypes.ValidatorUpdates, events []abcitypes.Event) (nxtVSet *cmttypes.ValidatorSet, err error) {
 	if updates.Len() <= 0 {
-		return
+		return nil, nil
 	}
 	nxtVSetAdapter := cmn.NewValidatorSetAdapter(vset)
 
-	fmt.Println("before calc new VSET")
-	fmt.Println("VSET: ", hex.EncodeToString(vset.Hash()))
-	for i, v := range vset.Validators {
-		fmt.Println("index ", i, v.Address.String(), v.PubKey.Type(), hex.EncodeToString(v.PubKey.Bytes()))
-	}
-	fmt.Println("--------------------------------------------------")
-
-	// veMap := make(map[string]validatorExtra)
-	// for _, ev := range events {
-	// 	if ev.Type == "ValidatorExtra" {
-	// 		ve := validatorExtra{}
-	// 		for _, attr := range ev.Attributes {
-	// 			switch attr.Key {
-	// 			case "address":
-	// 				ve.Address = common.Address{}
-	// 			case "name":
-	// 				ve.Name = attr.Value
-	// 			case "pubkey":
-	// 				ve.Pubkey, _ = hex.DecodeString(attr.Value)
-	// 			case "ip":
-	// 				ve.IP = attr.Value
-	// 			case "port":
-	// 				ve.Port, _ = strconv.ParseUint(attr.Value, 10, 32)
-	// 			}
-	// 		}
-	// 		veMap[hex.EncodeToString(ve.Pubkey)] = ve
-	// 	}
-	// }
 	for _, update := range updates {
-		pubkey, err := bls12381.NewPublicKeyFromBytes(update.PubKeyBytes)
+		pubkey, err := decodeValidatorPubKey(update)
 		if err != nil {
-			panic(err)
+			return nil, fmt.Errorf("validator update pubkey decode failed (type=%q): %w", update.PubKeyType, err)
 		}
 		if update.Power == 0 {
 			nxtVSetAdapter.DeleteByPubkey(update.PubKeyBytes)
@@ -258,13 +264,7 @@ func calcNewValidatorSet(vset *cmttypes.ValidatorSet, updates abcitypes.Validato
 	}
 
 	nxtVSet = nxtVSetAdapter.ToValidatorSet()
-	fmt.Println("Next VSET: ", hex.EncodeToString(nxtVSet.Hash()))
-	for i, v := range nxtVSet.Validators {
-		fmt.Println("index ", i, v.Address.String(), v.PubKey.Type(), hex.EncodeToString(v.PubKey.Bytes()))
-	}
-	fmt.Println("--------------------------------------------------")
-
-	return
+	return nxtVSet, nil
 }
 
 func CalcAddedValidators(curVSet, nxtVSet *cmttypes.ValidatorSet) (added []*cmttypes.Validator) {

@@ -54,7 +54,9 @@ func (k BLSPubKey) Equals(other cmtcrypto.PubKey) bool {
 }
 
 func (k BLSPubKey) Type() string {
-	return "bls12-381.pubkey"
+	// 返回 CometBFT codec 认识的 "bls12_381"，以便 Validator.Bytes()/Hash() 能序列化；
+	// 48 字节格式在 load 时由 chain 侧单独处理。
+	return "bls12_381"
 }
 
 var _ crypto.PublicKey = BLSPubKey{}

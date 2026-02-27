@@ -6,12 +6,16 @@
 package chain
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 
 	cmtdb "github.com/cometbft/cometbft-db"
 	v2 "github.com/cometbft/cometbft/api/cometbft/abci/v2"
 	cmtproto "github.com/cometbft/cometbft/api/cometbft/types/v2"
+	cmtcrypto "github.com/cometbft/cometbft/v2/crypto"
+	cryptoencoding "github.com/cometbft/cometbft/v2/crypto/encoding"
 	cmttypes "github.com/cometbft/cometbft/v2/types"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/meterio/supernova/block"
@@ -244,7 +248,15 @@ func saveValidatorSet(w cmtdb.DB, vset *cmttypes.ValidatorSet) error {
 	return batch.Write()
 }
 
-// loadBestQC load the best qc
+// validatorPubKeyFromProto 从 proto 解码公钥，支持 48 字节 BLS（Prysm 格式），与 consensus.decodeValidatorPubKey 一致。
+func validatorPubKeyFromProto(pubKeyType string, pubKeyBytes []byte) (cmtcrypto.PubKey, error) {
+	if pubKeyType == "bls12_381" && len(pubKeyBytes) == 48 {
+		return types.BLSPubKey(pubKeyBytes), nil
+	}
+	return cryptoencoding.PubKeyFromTypeAndBytes(pubKeyType, pubKeyBytes)
+}
+
+// loadValidatorSet 加载验证者集；含 48 字节 BLS 时用 validatorPubKeyFromProto 解码，否则 CometBFT 会报错。
 func loadValidatorSet(r cmtdb.DB, vhash []byte) (*cmttypes.ValidatorSet, error) {
 	vsetProto := new(cmtproto.ValidatorSet)
 	key := append(validatorPrefix, vhash...)
@@ -252,13 +264,46 @@ func loadValidatorSet(r cmtdb.DB, vhash []byte) (*cmttypes.ValidatorSet, error) 
 	if err != nil {
 		return nil, err
 	}
-
-	vsetProto.Unmarshal(vsetBytes)
-	vset, err := cmttypes.ValidatorSetFromProto(vsetProto)
+	if err := vsetProto.Unmarshal(vsetBytes); err != nil {
+		return nil, err
+	}
+	validators := make([]*cmttypes.Validator, 0, len(vsetProto.Validators))
+	for _, vp := range vsetProto.Validators {
+		if vp == nil {
+			continue
+		}
+		pk, err := validatorPubKeyFromProto(vp.PubKeyType, vp.PubKeyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("validator pubkey decode: %w", err)
+		}
+		v := &cmttypes.Validator{
+			Address:          vp.Address,
+			PubKey:           pk,
+			VotingPower:      vp.VotingPower,
+			ProposerPriority: vp.ProposerPriority,
+		}
+		validators = append(validators, v)
+	}
+	if len(validators) == 0 {
+		return nil, fmt.Errorf("empty validator set")
+	}
+	vset, err := cmttypes.ValidatorSetFromExistingValidators(validators)
 	if err != nil {
 		return nil, err
 	}
-	return vset, err
+	if vsetProto.Proposer != nil {
+		pk, err := validatorPubKeyFromProto(vsetProto.Proposer.PubKeyType, vsetProto.Proposer.PubKeyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("proposer pubkey decode: %w", err)
+		}
+		for _, v := range vset.Validators {
+			if bytes.Equal(v.Address, vsetProto.Proposer.Address) && bytes.Equal(v.PubKey.Bytes(), pk.Bytes()) {
+				vset.Proposer = v
+				break
+			}
+		}
+	}
+	return vset, nil
 }
 
 // saveInitChainResponse save the init chain response

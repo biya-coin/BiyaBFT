@@ -56,14 +56,20 @@ func main() {
 		slog.Error("Invalid configuration data", "err", err)
 	}
 	dbPath := filepath.Join(homeDir, "badger")
+	if err := os.MkdirAll(dbPath, 0o700); err != nil {
+		slog.Error("Creating database directory", "path", dbPath, "err", err)
+		os.Exit(1)
+	}
 	db, err := pebble.Open(dbPath, &pebble.Options{})
-
 	if err != nil {
-		slog.Error("Opening database", "err", err)
+		slog.Error("Opening database (ensure each node uses a different -cmt-home)", "path", dbPath, "err", err)
+		os.Exit(1)
 	}
 	defer func() {
-		if err := db.Close(); err != nil {
-			slog.Error("Closing database", "err", err)
+		if db != nil {
+			if err := db.Close(); err != nil {
+				slog.Error("Closing database", "err", err)
+			}
 		}
 	}()
 
@@ -76,17 +82,17 @@ func main() {
 
 	nodeKey, err := types.LoadNodeKey(config.NodeKeyFile())
 	if err != nil {
-		slog.Error("failed to load node's key", "nodeKeyFile", config.NodeKeyFile(), "err", err)
+		slog.Error("failed to load node's key (run 'supernova init' under this -cmt-home?)", "nodeKeyFile", config.NodeKeyFile(), "err", err)
+		os.Exit(1)
 	}
 
 	logger := cmtlog.NewLogger(os.Stdout)
 	logger, err = cmtflags.ParseLogLevel(config.LogLevel, logger, cfg.DefaultLogLevel)
-
 	if err != nil {
 		slog.Error("failed to parse log level", "err", err)
+		os.Exit(1)
 	}
 	ctx, cancelFn := context.WithCancel(context.TODO())
-	// config.LogLevel = "debug" // default is info
 	node, err := node.NewNode(
 		ctx,
 		config,
@@ -98,9 +104,9 @@ func main() {
 		cmtnode.DefaultMetricsProvider(config.Instrumentation),
 		logger,
 	)
-
 	if err != nil {
 		slog.Error("Creating node", "err", err)
+		os.Exit(1)
 	}
 
 	node.Start()
