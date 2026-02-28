@@ -553,14 +553,16 @@ func (p *Pacemaker) OnReceiveTimeout(mi IncomingMsg) {
 		return
 	}
 
-	// collect vote and see if QC is formed
-	newQC, commitInfo := p.epochState.AddQCVote(msg.SignerIndex, msg.LastVoteRound, msg.LastVoteBlockID, msg.LastVoteSignature, msg.LastVoteExtension, msg.LastExtensionSignature, msg.LastNonRpVoteExtension, msg.LastNonRpExtensionSignature)
-	if newQC != nil {
-		escortQCNode := p.chain.GetDraftByEscortQC(newQC)
-		p.UpdateQCHigh(&block.DraftQC{QCNode: escortQCNode, QC: newQC})
-		p.Update(newQC)
+	// collect vote and see if QC is formed (if the message carries a valid last vote)
+	if len(msg.LastVoteSignature) > 0 {
+		newQC, commitInfo := p.epochState.AddQCVote(msg.SignerIndex, msg.LastVoteRound, msg.LastVoteBlockID, msg.LastVoteSignature, msg.LastVoteExtension, msg.LastExtensionSignature, msg.LastNonRpVoteExtension, msg.LastNonRpExtensionSignature)
+		if newQC != nil {
+			escortQCNode := p.chain.GetDraftByEscortQC(newQC)
+			p.UpdateQCHigh(&block.DraftQC{QCNode: escortQCNode, QC: newQC})
+			p.Update(newQC)
+		}
+		commitInfoCache.Add(msg.LastVoteBlockID.String(), commitInfo)
 	}
-	commitInfoCache.Add(msg.LastVoteBlockID.String(), commitInfo)
 
 	qc := msg.DecodeQCHigh()
 	qcNode := p.chain.GetDraftByEscortQC(qc)
@@ -621,6 +623,16 @@ func (p *Pacemaker) Start() {
 	p.Regulate()
 	go p.subscribeToConsensusMessage()
 	go p.mainLoop()
+}
+
+// GetCurrentRound returns the current round.
+func (p *Pacemaker) GetCurrentRound() uint32 {
+	return p.currentRound
+}
+
+// GetEpochState returns the current epoch state.
+func (p *Pacemaker) GetEpochState() *EpochState {
+	return p.epochState
 }
 
 // Committee Leader triggers

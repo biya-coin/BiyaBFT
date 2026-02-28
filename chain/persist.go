@@ -264,7 +264,7 @@ func loadValidatorSet(r cmtdb.DB, vhash []byte) (*cmttypes.ValidatorSet, error) 
 // saveInitChainResponse save the init chain response
 func saveInitChainResponse(w cmtdb.DB, res *v2.InitChainResponse) error {
 	batch := w.NewBatch()
-	key := append(initChainPrefix)
+	key := append([]byte(nil), initChainPrefix...)
 
 	marshaled, err := res.Marshal()
 	if err != nil {
@@ -280,7 +280,7 @@ func saveInitChainResponse(w cmtdb.DB, res *v2.InitChainResponse) error {
 // loadInitChainResponse load the init chain response
 func loadInitChainResponse(r cmtdb.DB) (*v2.InitChainResponse, error) {
 	res := new(v2.InitChainResponse)
-	key := append(initChainPrefix)
+	key := append([]byte(nil), initChainPrefix...)
 	marshaled, err := r.Get(key)
 	if err != nil {
 		return nil, err

@@ -45,9 +45,13 @@ func (vals *ValidatorSetAdapter) String() string {
 func (vals *ValidatorSetAdapter) Upsert(newV *cmttypes.Validator) {
 	for _, v := range vals.Validators {
 		if bytes.Equal(v.PubKey.Bytes(), newV.PubKey.Bytes()) {
+			// Update in-place: do NOT append again to avoid duplicates
 			v.Address = newV.Address
+			v.VotingPower = newV.VotingPower
+			return
 		}
 	}
+	// Not found: add as new validator
 	vals.Validators = append(vals.Validators, newV)
 }
 
@@ -109,19 +113,25 @@ func ApplyUpdatesToValidatorSet(vset *cmttypes.ValidatorSet, validatorUpdates []
 	// delete/update existing validator
 	for i := 0; i < len(vs); {
 		v := vs[i]
+		matched := false
 		for j, update := range validatorUpdates {
 			if bytes.Equal(v.PubKey.Bytes(), update.PubKeyBytes) {
-				if v.VotingPower == 0 {
+				matched = true
+				if update.Power == 0 {
+					// Remove validator
 					vs = append(vs[:i], vs[i+1:]...)
 					delete(addedIndex, j)
-					break
 				} else {
 					vs[i].VotingPower = update.Power
 					i++
 					delete(addedIndex, j)
-					break
 				}
+				break
 			}
+		}
+		if !matched {
+			// No update for this validator, keep it as-is and advance
+			i++
 		}
 	}
 
