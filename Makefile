@@ -11,7 +11,7 @@ MAJOR = $(shell go version | cut -d' ' -f3 | cut -b 3- | cut -d. -f1)
 MINOR = $(shell go version | cut -d' ' -f3 | cut -b 3- | cut -d. -f2)
 export GO111MODULE=on
 
-.PHONY: supernova disco mdb all clean test build_bls testnet-start testnet-stop testnet-check
+.PHONY: supernova disco mdb all clean test build_bls gen_testnet testnet-init testnet-reset testnet-start testnet-stop testnet-check
 
 build_bls:| go_version_check
 	@echo "building with BLS12-381 support..."
@@ -59,6 +59,27 @@ test:| go_version_check
 	@go test -cover $(PACKAGES)
 
 ## Testnet helpers (scripts live in scripts/)
+
+# Build the testnet-config generator tool (requires bls12381 tag)
+gen_testnet:| go_version_check
+	@echo "Building gen_testnet tool..."
+	@go build -tags bls12381 -o bin/gen_testnet ./cmd/gen_testnet
+	@echo "Done. Binary at bin/gen_testnet"
+
+# Generate testnet configs without starting nodes
+testnet-init:| go_version_check
+	@go run -tags bls12381 ./cmd/gen_testnet --out-dir ./mytestnet
+
+# Wipe and regenerate testnet from scratch
+testnet-reset:| go_version_check
+	@echo "Stopping any running nodes..."
+	@pkill -f "mytestnet/node" || true
+	@sleep 1
+	@echo "Removing old testnet data..."
+	@rm -rf ./mytestnet
+	@go run -tags bls12381 ./cmd/gen_testnet --out-dir ./mytestnet
+
+# Start all nodes (auto-generates configs if not initialized)
 testnet-start:
 	@bash scripts/start_testnet.sh
 
