@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -324,7 +325,12 @@ func (c *Communicator) BroadcastBlock(blk *block.EscortedBlock) {
 			client := c.GetRPCClient(peer.ID())
 
 			if _, err := client.NotifyBlock(context.Background(), &pb.NotifyBlockRequest{PeerId: myPeerID.String(), BlockBytes: bbytes}); err != nil {
-				peer.logger.Error(fmt.Sprintf("Failed to propagate %s", blk.Block.CompactString()), "err", err)
+				msg := fmt.Sprintf("Failed to propagate %s", blk.Block.CompactString())
+				if isTransientStreamError(err) {
+					peer.logger.Warn(msg, "err", err)
+				} else {
+					peer.logger.Error(msg, "err", err)
+				}
 			}
 		})
 	}
@@ -342,10 +348,27 @@ func (c *Communicator) BroadcastBlock(blk *block.EscortedBlock) {
 			client := c.GetRPCClient(peer.ID())
 
 			if _, err := client.NotifyBlockID(context.Background(), &pb.NotifyBlockIDRequest{PeerId: myPeerID.String(), BlockIdBytes: blkID[:]}); err != nil {
-				peer.logger.Error(fmt.Sprintf("Failed to announce %s", blk.Block.CompactString()), "err", err)
+				msg := fmt.Sprintf("Failed to announce %s", blk.Block.CompactString())
+				if isTransientStreamError(err) {
+					peer.logger.Warn(msg, "err", err)
+				} else {
+					peer.logger.Error(msg, "err", err)
+				}
 			}
 		})
 	}
+}
+
+// isTransientStreamError 判断是否为连接/stream 瞬时错误（如对端关闭、stream reset），无需按严重错误处理。
+func isTransientStreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "stream reset") ||
+		strings.Contains(s, "manager closed") ||
+		strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "broken pipe")
 }
 
 // PeerCount returns count of peers.

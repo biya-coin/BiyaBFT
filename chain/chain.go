@@ -108,7 +108,8 @@ func New(db cmtdb.DB, verbose bool) (*Chain, error) {
 func (c *Chain) Initialize(gene *genesis.Genesis) error {
 	var bestBlock *block.Block
 
-	if bestBlockID, _ := loadBestBlockID(c.db); bytes.Equal(bestBlockID.Bytes(), (&types.Bytes32{}).Bytes()) {
+	bestBlockID, _ := loadBestBlockID(c.db)
+	if bytes.Equal(bestBlockID.Bytes(), (&types.Bytes32{}).Bytes()) {
 		// could not load bestblock, usually this means chain is not initialized
 		genesisBlock, err := gene.Build()
 		if err != nil {

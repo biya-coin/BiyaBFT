@@ -2,10 +2,10 @@ package consensus
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 
 	abcitypes "github.com/cometbft/cometbft/v2/abci/types"
-	"github.com/cometbft/cometbft/v2/crypto/bls12381"
 	cmttypes "github.com/cometbft/cometbft/v2/types"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/meterio/supernova/chain"
@@ -91,9 +91,9 @@ func (vr *ValidatorSetRegistry) Update(num uint32, vset *cmttypes.ValidatorSet, 
 	nxtVSetAdapter := cmn.NewValidatorSetAdapter(vset)
 
 	for _, update := range updates {
-		pubkey, err := bls12381.NewPublicKeyFromBytes(update.PubKeyBytes)
+		pubkey, err := decodeValidatorPubKey(update)
 		if err != nil {
-			panic(err)
+			return nil, nil, fmt.Errorf("validator update pubkey decode failed (type=%q): %w", update.PubKeyType, err)
 		}
 		if update.Power == 0 {
 			nxtVSetAdapter.DeleteByPubkey(update.PubKeyBytes)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 
 	abci "github.com/cometbft/cometbft/v2/abci/types"
 	"github.com/cometbft/cometbft/v2/libs/log"
@@ -59,7 +60,7 @@ func (h *Handshaker) Handshake(ctx context.Context, proxyApp proxy.AppConns) err
 	if err != nil {
 		return fmt.Errorf("error calling Info: %v", err)
 	}
-
+	slog.Info("ABCI Handshake App Info", "res", res)
 	blockHeight := res.LastBlockHeight
 	if blockHeight < 0 {
 		return fmt.Errorf("got a negative last block height (%d) from the app", blockHeight)
@@ -85,7 +86,7 @@ func (h *Handshaker) Handshake(ctx context.Context, proxyApp proxy.AppConns) err
 	if err != nil {
 		return fmt.Errorf("error on replay: %v", err)
 	}
-
+	slog.Info("Completed ABCI Handshake - CometBFT and App are synced", "appHeight", blockHeight, "appHash", log.NewLazySprintf("%X", appHash))
 	h.logger.Info("Completed ABCI Handshake - CometBFT and App are synced",
 		"appHeight", blockHeight, "appHash", log.NewLazySprintf("%X", appHash))
 
@@ -132,14 +133,20 @@ func (h *Handshaker) ReplayBlocks(
 			h.logger.Error("InitChain failed", "err", err)
 			return nil, err
 		}
-
+		slog.Info("InitChain Response", "res", res)
 		appHash = res.AppHash
 
-		gene := genesis.NewGenesis(h.genDoc, res.Validators)
+		// When app (e.g. noop) returns empty Validators, use request validators so genesis is correct.
+		validatorUpdates := res.Validators
+		if len(validatorUpdates) == 0 {
+			validatorUpdates = geneVUpdates
+		}
+		gene := genesis.NewGenesis(h.genDoc, validatorUpdates)
 
 		err = h.chain.Initialize(gene)
 		if err != nil {
 			h.logger.Error("chain initialize failed", "err", err)
+			return nil, err
 		}
 
 		// for i, v := range res.Validators {

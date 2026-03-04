@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	cmtcfg "github.com/cometbft/cometbft/v2/config"
 	cmtflags "github.com/cometbft/cometbft/v2/libs/cli/flags"
@@ -51,9 +52,8 @@ func AddNodeFlags(cmd *cobra.Command) {
 	cmd.Flags().String(
 		"proxy_app",
 		config.ProxyApp,
-		"proxy app address, or one of: 'kvstore',"+
-			" 'persistent_kvstore' or 'noop' for local testing.")
-	cmd.Flags().String("abci", config.ABCI, "specify abci transport (socket | grpc)")
+		"ABCI app address for remote connection (e.g. tcp://127.0.0.1:26658 for biyachain-core), or built-in: 'kvstore', 'persistent_kvstore', 'noop'")
+	cmd.Flags().String("abci", config.ABCI, "ABCI transport: socket or grpc (use grpc for dual-process with biyachain-core)")
 
 	// rpc flags
 	cmd.Flags().String("rpc.laddr", config.RPC.ListenAddress, "RPC listen address. Port required")
@@ -77,6 +77,9 @@ func AddNodeFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("p2p.pex", config.P2P.PexReactor, "enable/disable Peer-Exchange")
 	cmd.Flags().Bool("p2p.seed_mode", config.P2P.SeedMode, "enable/disable seed mode")
 	cmd.Flags().String("p2p.private_peer_ids", config.P2P.PrivatePeerIDs, "comma-delimited private peer IDs")
+	cmd.Flags().Uint("p2p.quic_port", 0, "P2P QUIC listen port (0=use default 13000; set in config.toml [p2p] quic_port for each node)")
+	cmd.Flags().Uint("p2p.tcp_port", 0, "P2P TCP listen port (0=use default 13000)")
+	cmd.Flags().Uint("p2p.udp_port", 0, "P2P UDP/discv5 listen port (0=use default 12000)")
 
 	// consensus flags
 	cmd.Flags().Bool(
@@ -105,6 +108,7 @@ func RunNodeCmd() *cobra.Command {
 		Aliases: []string{"node", "run"},
 		Short:   "Run the Supernova node",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			slog.Info("Running node", "config", config)
 			if err := checkGenesisHash(config); err != nil {
 				return err
 			}
@@ -119,15 +123,23 @@ func RunNodeCmd() *cobra.Command {
 
 			privValidator, _ := privval.LoadOrGenFilePV(config.PrivValidatorKeyFile(), config.PrivValidatorStateFile(), nil)
 			ctx := context.TODO()
+			// For gRPC, use host:port so grpc.NewClient doesn't block on "tcp://" target (cometbft dialer still gets host:port and dials tcp)
+			proxyAddr := config.ProxyApp
+			if config.ABCI == "grpc" && (strings.HasPrefix(proxyAddr, "tcp://") || strings.HasPrefix(proxyAddr, "unix://")) {
+				proxyAddr = strings.SplitN(proxyAddr, "://", 2)[1]
+			}
 			node, err := node.NewNode(ctx, config,
 				privValidator,
 				nodeKey,
-				proxy.DefaultClientCreator(config.ProxyApp, config.ABCI, config.DBDir()),
+				proxy.DefaultClientCreator(proxyAddr, config.ABCI, config.DBDir()),
 				cmtnode.DefaultGenesisDocProviderFunc(config),
 				cmtcfg.DefaultDBProvider,
 				cmtnode.DefaultMetricsProvider(config.Instrumentation),
 				logger,
 			)
+			if err != nil {
+				return err
+			}
 
 			node.Start()
 
@@ -150,6 +162,7 @@ func RunNodeCmd() *cobra.Command {
 }
 
 func checkGenesisHash(config *cmtcfg.Config) error {
+	slog.Info("Checking genesis hash", "genesisHash", genesisHash, "config.Genesis", config.Genesis)
 	if len(genesisHash) == 0 || config.Genesis == "" {
 		return nil
 	}

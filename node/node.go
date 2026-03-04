@@ -11,8 +11,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/beevik/ntp"
@@ -25,6 +27,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/meterio/supernova/libs/p2p"
 	"github.com/meterio/supernova/libs/rpc"
+	"github.com/spf13/viper"
 
 	db "github.com/cometbft/cometbft-db"
 	cmtnode "github.com/cometbft/cometbft/v2/node"
@@ -126,6 +129,12 @@ func NewNode(
 	InitLogger(config)
 
 	mainDB, err := dbProvider(&cmtcfg.DBContext{ID: "maindb", Config: config})
+	if err != nil {
+		return nil, fmt.Errorf("opening main db (use a different -cmt-home per node): %w", err)
+	}
+	if mainDB == nil {
+		return nil, fmt.Errorf("main db is nil")
+	}
 
 	genDoc, err := LoadGenesisDoc(mainDB, genesisDocProvider)
 	if err != nil {
@@ -157,19 +166,11 @@ func NewNode(
 		logger.Error("Handshake failed", "err", err)
 		return nil, err
 	}
-
+	slog.Info("Handshake completed")
 	txPool := txpool.New(chain, txpool.DefaultTxPoolOptions)
-	defer func() { slog.Info("closing tx pool..."); txPool.Close() }()
 
-	var BootstrapNodes []string
-	// BootstrapNodes = append(BootstrapNodes, "enr:-MK4QGZ6np5N03sJeQPI1ep3L_13ckTJQ5TXcj81mk_UV3oeA-mMtcw7JViYP3cgSBmvxQV74MRTTfUNM5TUqr_D2BiGAZRynhEfh2F0dG5ldHOIAAAAAAAAAACEZXRoMpBLDKxQAQAAAAAiAQAAAAAAgmlkgnY0gmlwhKwfWYOJc2VjcDI1NmsxoQMkZ9waUAVNMFXOY3B5VlDTqLZHqb4MqKOFXSvh-k4dUohzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // nova-3
-	// BootstrapNodes = append(BootstrapNodes, "enr:-MK4QM98ZZL8E3Bx64wPtz49hJ8paIFH8Rv5QCvPTOLJeBYfSobjpjqMfrLODfwiB5_SoWh9Yo_5dvBZ2NLNilgEI9mGAZXZi7yHh2F0dG5ldHOIAAAAAAAAAACEZXRoMpAWc8IXAQAAAAAiAQAAAAAAgmlkgnY0gmlwhKwfEoiJc2VjcDI1NmsxoQLQJYjiRjexHE-A2FdO0PHyZUhaFYpHhDef1XVZZC5qaohzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // nova-2
-	// BootstrapNodes = append(BootstrapNodes, "enr:-MK4QGaHtB-0kwFShAZ3lfLx0HxM-gUX3pPwS6UQkOh98dZyJopO9xFfRXLJpeg-NVVgEDjIcHOMDo2w2usa1sA2qXaGAZXZi7uFh2F0dG5ldHOIAAAAAAAAAACEZXRoMpAWc8IXAQAAAAAiAQAAAAAAgmlkgnY0gmlwhKwfHXiJc2VjcDI1NmsxoQPxAUSjJt5Vza3kwhv_XtDmQKCrI2SSjjQFrFkaB_ZskohzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // nova-1
-	BootstrapNodes = append(BootstrapNodes, "enr:-MK4QFGVs_TSw_GfRuAxg76f05CsCXR1OoGX30zlaxvlrYptBdOiTZpTSt9ZxXFSGU5nvzkaJe3clIxGPuYl_Dvuf1iGAZhoA3sAh2F0dG5ldHOIAAAAAAAAAACEZXRoMpDC2eMlAQAAAAAiAQAAAAAAgmlkgnY0gmlwhAqKD_eJc2VjcDI1NmsxoQPPS9LS1HeU3LMS5WU1Zi_ePJihE2oqw1mIG6fuq7kajohzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // super-1
-	BootstrapNodes = append(BootstrapNodes, "enr:-MK4QP3nEwXgKz7hUGxg02X7ssAS_PvALfYKhmEbd8mLibn2TUfIe0lQzIZQ4ikG6mNt1kELsLYJLSToHk6NJvdcpXCGAZhoA3wch2F0dG5ldHOIAAAAAAAAAACEZXRoMpCR0elIAQAAAAAiAQAAAAAAgmlkgnY0gmlwhAqKD_iJc2VjcDI1NmsxoQKfjpkMQm9CuuRLkE_r2VoH7wtlz2HQwr4h7t6rt2gt84hzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // super-2
-
-	// BootstrapNodes = append(BootstrapNodes, "enr:-MK4QMWkLjGkpPB2iP84pdrBqyB-SjJiodPu0oLYQLVLXhgmPMeqN8Nk24Al9mElveJXJFaZUkjwWHAsz1oJN_A-hYeGAZSlsvkzh2F0dG5ldHOIAAAAAAAAAACEZXRoMpAWc8IXAQAAAAAiAQAAAAAAgmlkgnY0gmlwhKwfEoiJc2VjcDI1NmsxoQMog1olklG4kSkaiGepYTRoy0OseZus8-cOKqzsOqlkBIhzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // simd nova2
-	// BootstrapNodes = append(BootstrapNodes, "enr:-MK4QGD2XTHBtQ_r17bA3MHvUqrhVfKvKKqIeDN3sD-YVhkSM2j6oiv2fKHTK_5lvCn6OPa-WHZ3m9Ao1C6oz9P6i9KGAZSlsvidh2F0dG5ldHOIAAAAAAAAAACEZXRoMpAWc8IXAQAAAAAiAQAAAAAAgmlkgnY0gmlwhKwfHXiJc2VjcDI1NmsxoQOucvYee5KxdMkhPqF4W8KGJGSuOhqzk59ZJiPyogCn6ohzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A") // simd nova1
+	// Bootstrap 节点：优先从环境变量 SUPERNOVA_BOOTSTRAP_ENRS 读取（逗号分隔的 ENR），否则从 config.P2P.Seeds 解析
+	BootstrapNodes := getBootstrapNodes(config)
 
 	geneBlock, err := chain.GetTrunkBlock(0)
 	if err != nil {
@@ -188,7 +189,10 @@ func NewNode(
 
 	pubkey, err := privValidator.GetPubKey()
 
-	apiAddr := ":26657"
+	apiAddr := rpcListenAddrToHostPort(config.RPC.ListenAddress)
+	if apiAddr == "" {
+		apiAddr = ":26657"
+	}
 	chainId, err := strconv.ParseUint(genDoc.ChainID, 10, 64)
 	apiServer := api.NewAPIServer(proxyApp.Query(), apiAddr, chainId, config.BaseConfig.Version, chain, txPool, pacemaker, pubkey.Bytes(), p2pSrv)
 
@@ -237,24 +241,85 @@ func createAndStartProxyAppConns(clientCreator cmtproxy.ClientCreator, metrics *
 	return proxyApp, nil
 }
 
+// getBootstrapNodes 返回用于 discv5 的 bootstrap 节点列表（ENR 或 multiaddr）。
+// 优先使用环境变量 SUPERNOVA_BOOTSTRAP_ENRS（逗号分隔），否则使用 config.P2P.Seeds。
+func getBootstrapNodes(config *cmtcfg.Config) []string {
+	if s := os.Getenv("SUPERNOVA_BOOTSTRAP_ENRS"); s != "" {
+		return splitAndTrim(s)
+	}
+	if config.P2P.Seeds != "" {
+		return splitAndTrim(config.P2P.Seeds)
+	}
+	return nil
+}
+
+func splitAndTrim(s string) []string {
+	var out []string
+	for _, v := range strings.Split(s, ",") {
+		if t := strings.TrimSpace(v); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// rpcListenAddrToHostPort 从 config.RPC.ListenAddress（如 "tcp://127.0.0.1:26657"）提取 host:port 供 API 监听。
+func rpcListenAddrToHostPort(laddr string) string {
+	laddr = strings.TrimSpace(laddr)
+	if laddr == "" {
+		return ""
+	}
+	if idx := strings.Index(laddr, "://"); idx >= 0 {
+		laddr = laddr[idx+3:]
+	}
+	return strings.TrimSpace(laddr)
+}
+
+// getP2PPorts 从配置读取 P2P 的 QUIC/TCP/UDP 端口；未配置时不再用偏移推算，使用默认值。
+// 在 config.toml 的 [p2p] 中配置：quic_port、tcp_port、udp_port（建议每个节点显式指定，避免跨机端口不一致）。
+func getP2PPorts(config *cmtcfg.Config) (quic, tcp, udp uint) {
+	const defaultQUIC = 13000
+	const defaultTCP = 13000
+	const defaultUDP = 12000
+	q := viper.GetInt("p2p.quic_port")
+	t := viper.GetInt("p2p.tcp_port")
+	u := viper.GetInt("p2p.udp_port")
+	if q > 0 && t > 0 && u > 0 {
+		return uint(q), uint(t), uint(u)
+	}
+	// 未配齐时用默认值，不再根据 laddr 做加减偏移
+	if q > 0 {
+		quic = uint(q)
+	} else {
+		quic = defaultQUIC
+	}
+	if t > 0 {
+		tcp = uint(t)
+	} else {
+		tcp = defaultTCP
+	}
+	if u > 0 {
+		udp = uint(u)
+	} else {
+		udp = defaultUDP
+	}
+	return quic, tcp, udp
+}
+
 func newP2PService(ctx context.Context, config *cmtcfg.Config, bootstrapNodes []string, geneBlock *block.Block) *p2p.Service {
+	quicPort, tcpPort, udpPort := getP2PPorts(config)
 	svc, err := p2p.NewService(ctx, &p2p.Config{
-		NoDiscovery: false,
-		// StaticPeers:          slice.SplitCommaSeparated(cliCtx.StringSlice(cmd.StaticPeers.Name)),
+		NoDiscovery:          false,
 		Discv5BootStrapAddrs: p2p.ParseBootStrapAddrs(bootstrapNodes),
-		// RelayNodeAddr:        cliCtx.String(cmd.RelayNode.Name),
-		DataDir: config.RootDir,
-		// LocalIP:              cliCtx.String(cmd.P2PIP.Name),
-		// HostAddress: config.P2P.ExternalAddress,
-		// HostDNS:      cliCtx.String(cmd.P2PHostDNS.Name),
-		PrivateKey:   "",
-		StaticPeerID: true,
-		// MetaDataDir:          cliCtx.String(cmd.P2PMetadata.Name),
-		QUICPort:  13000,
-		TCPPort:   13000,
-		UDPPort:   12000,
-		MaxPeers:  uint(config.P2P.MaxNumInboundPeers),
-		QueueSize: 1000,
+		StaticPeers:          bootstrapNodes, // 与 seeds/bootstrap ENR 一致，用于主动拨号连接，解决两节点 0 peer
+		DataDir:              config.RootDir,
+		PrivateKey:           "",
+		StaticPeerID:         true,
+		QUICPort:             quicPort,
+		TCPPort:              tcpPort,
+		UDPPort:              udpPort,
+		MaxPeers:             uint(config.P2P.MaxNumInboundPeers),
+		QueueSize:            1000,
 		// AllowListCIDR:        cliCtx.String(cmd.P2PAllowList.Name),
 		// DenyListCIDR:         slice.SplitCommaSeparated(cliCtx.StringSlice(cmd.P2PDenyList.Name)),
 		// EnableUPnP:           cliCtx.Bool(cmd.EnableUPnPFlag.Name),
@@ -295,7 +360,9 @@ func doHandshake(
 ) error {
 	handshaker := consensus.NewHandshaker(c, genDoc)
 	handshaker.SetEventBus(eventBus)
+	slog.Info("Starting handshake")
 	if err := handshaker.Handshake(ctx, proxyApp); err != nil {
+		slog.Error("Handshake failed", "err", err)
 		return fmt.Errorf("error during handshake: %v", err)
 	}
 	return nil

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 
 	"github.com/cockroachdb/pebble"
@@ -60,7 +61,10 @@ func (app *KVStoreApplication) CheckTx(_ context.Context, check *abcitypes.Check
 }
 
 func (app *KVStoreApplication) InitChain(_ context.Context, chain *abcitypes.InitChainRequest) (*abcitypes.InitChainResponse, error) {
-	return &abcitypes.InitChainResponse{}, nil
+	fmt.Println("InitChain", "chain", chain.ChainId)
+	return &abcitypes.InitChainResponse{
+		Validators: chain.Validators,
+	}, nil
 }
 
 func (app *KVStoreApplication) PrepareProposal(_ context.Context, proposal *abcitypes.PrepareProposalRequest) (*abcitypes.PrepareProposalResponse, error) {

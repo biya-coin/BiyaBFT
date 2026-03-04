@@ -457,11 +457,14 @@ func (p *Pacemaker) OnReceiveVote(mi IncomingMsg) {
 func (p *Pacemaker) OnPropose(qc *block.DraftQC, round uint32) *block.DraftBlock {
 	parent := p.chain.GetDraftByEscortQC(qc.QC)
 	err, bnew := p.CreateLeaf(parent, qc, round)
-
-	fmt.Println("Proposed block: ", bnew.ProposedBlock)
-	if err != nil {
-		p.logger.Error("could not create leaf", "err", err)
+	if err != nil || bnew == nil {
+		if err != nil {
+			p.logger.Error("could not create leaf", "err", err)
+		}
 		return nil
+	}
+	if bnew.ProposedBlock != nil {
+		p.logger.Debug("Proposed block", "block", bnew.ProposedBlock.CompactString())
 	}
 
 	if bnew.Height <= qc.QC.Number() {

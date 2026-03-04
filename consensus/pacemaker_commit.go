@@ -60,7 +60,8 @@ func (p *Pacemaker) CommitBlock(blk *block.Block, escortQC *block.QuorumCert) er
 		}
 	}
 
-	if p.QCHigh.QC.Round < escortQC.Round {
+	// 仅当本次提交的 QC 对应的区块不低于当前 QCHigh 时才更新，避免用旧区块的 QC（如 E1.R10）覆盖已更新的 QCHigh（如 E2.R0 -> #11）导致后续 OnBeat 时 "Invalid round to propose"
+	if p.QCHigh == nil || escortQC.Number() > p.QCHigh.QC.Number() || (escortQC.Number() == p.QCHigh.QC.Number() && escortQC.Round > p.QCHigh.QC.Round) {
 		draftBlk := p.chain.GetDraftByEscortQC(escortQC)
 		p.QCHigh = &block.DraftQC{QCNode: draftBlk, QC: escortQC}
 		p.logger.Info(`QCHigh updated`, "epoch", escortQC.Epoch, "round", escortQC.Round)
