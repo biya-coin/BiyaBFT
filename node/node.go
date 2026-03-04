@@ -168,7 +168,6 @@ func NewNode(
 	}
 	slog.Info("Handshake completed")
 	txPool := txpool.New(chain, txpool.DefaultTxPoolOptions)
-	defer func() { slog.Info("closing tx pool..."); txPool.Close() }()
 
 	// Bootstrap 节点：优先从环境变量 SUPERNOVA_BOOTSTRAP_ENRS 读取（逗号分隔的 ENR），否则从 config.P2P.Seeds 解析
 	BootstrapNodes := getBootstrapNodes(config)

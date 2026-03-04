@@ -136,11 +136,17 @@ func (h *Handshaker) ReplayBlocks(
 		slog.Info("InitChain Response", "res", res)
 		appHash = res.AppHash
 
-		gene := genesis.NewGenesis(h.genDoc, res.Validators)
+		// When app (e.g. noop) returns empty Validators, use request validators so genesis is correct.
+		validatorUpdates := res.Validators
+		if len(validatorUpdates) == 0 {
+			validatorUpdates = geneVUpdates
+		}
+		gene := genesis.NewGenesis(h.genDoc, validatorUpdates)
 
 		err = h.chain.Initialize(gene)
 		if err != nil {
 			h.logger.Error("chain initialize failed", "err", err)
+			return nil, err
 		}
 
 		// for i, v := range res.Validators {

@@ -11,7 +11,7 @@ MAJOR = $(shell go version | cut -d' ' -f3 | cut -b 3- | cut -d. -f1)
 MINOR = $(shell go version | cut -d' ' -f3 | cut -b 3- | cut -d. -f2)
 export GO111MODULE=on
 
-.PHONY: supernova disco mdb all clean test
+.PHONY: supernova disco mdb all clean test supernova_bls12381
 
 # 使用 BLS 12-381 以与 node 共识所需密钥一致（init 生成 BLS 私钥）
 BUILD_TAGS ?= bls12381
@@ -24,7 +24,7 @@ supernova:| go_version_check
 
 supernova_bls12381:| go_version_check
 	@echo "building $@..."
-	@go build -v -o $(CURDIR)/bin/$@ -ldflags "-X main.version=$(METER_VERSION) -X main.gitCommit=$(GIT_COMMIT) -X main.gitTag=$(GIT_TAG)" -tags '$(BUILD_TAGS)' ./cmd/supernova
+	@go build -v -o $(CURDIR)/bin/$@ -ldflags "-X main.version=$(METER_VERSION) -X main.gitCommit=$(GIT_COMMIT) -X main.gitTag=$(GIT_TAG)" -tags '$(BUILD_TAGS)' ./cmd/supernova_bls12381
 	@echo "done. executable created at 'bin/$@'"
 
 
