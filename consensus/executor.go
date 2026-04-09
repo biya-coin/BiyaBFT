@@ -81,6 +81,9 @@ func (e *Executor) ProcessProposal(blk *block.Block) (bool, error) {
 	parent, err := e.chain.GetBlock(blk.ParentID())
 	if err != nil {
 		parentDraft := e.chain.GetDraft(blk.ParentID())
+		if parentDraft == nil {
+			return false, fmt.Errorf("parent block not found for proposal (parent=%x)", blk.ParentID().Bytes())
+		}
 		parent = parentDraft.ProposedBlock
 	}
 	proposerAddr, _ := vset.GetByIndex(int32(blk.ProposerIndex()))
@@ -102,11 +105,7 @@ func (e *Executor) ProcessProposal(blk *block.Block) (bool, error) {
 		panic("ProcessProposal responded with status " + resp.Status.String())
 	}
 
-	if resp.IsAccepted() {
-		for _, tx := range blk.Txs {
-			e.txPool.Remove(tx.Hash())
-		}
-	}
+	// 不在 ProcessProposal 接受时移除交易：提案可能未获 2/3 投票或超时，仅在实际提交后移除（见 applyBlock）
 	return resp.IsAccepted(), nil
 }
 
@@ -150,16 +149,23 @@ func (e *Executor) applyBlock(blk *block.Block, syncingToHeight int64) (appHash 
 	parent, err := e.chain.GetBlock(blk.ParentID())
 	if err != nil {
 		parentDraft := e.chain.GetDraft(blk.ParentID())
+		if parentDraft == nil {
+			return nil, nil, fmt.Errorf("parent block not found for apply (parent=%x)", blk.ParentID().Bytes())
+		}
 		parent = parentDraft.ProposedBlock
 	}
 	proposerAddr, _ := vset.GetByIndex(int32(blk.ProposerIndex()))
 	decidedLastCommit := e.chain.BuildLastCommitInfo(parent, blk)
-	// fmt.Println("Decided Last Commit")
-	// for _, v := range decidedLastCommit.Votes {
-	// 	fmt.Println("decided last commit: ", "address:", v.Validator.Address, "power:", v.Validator.Power)
-	// 	fmt.Println("block id flag: ", v.BlockIdFlag)
-	// }
-	// fmt.Println("------------------------------------------------")
+	// BaseApp optimistic execution keys off the last ProcessProposal hash. Some consensus paths
+	// can finalize without a matching ProcessProposal pass; always run ProcessProposal immediately
+	// before FinalizeBlock so OE hash matches (see also pacemaker ValidateProposal).
+	accepted, perr := e.ProcessProposal(blk)
+	if perr != nil {
+		return nil, nil, perr
+	}
+	if !accepted {
+		return nil, nil, fmt.Errorf("ProcessProposal rejected block #%d before FinalizeBlock", blk.Number())
+	}
 	abciResponse, err := e.proxyApp.FinalizeBlock(context.TODO(), &abci.FinalizeBlockRequest{
 		Hash:               blk.ID().Bytes(),
 		NextValidatorsHash: blk.Header().NextValidatorsHash,
@@ -193,6 +199,11 @@ func (e *Executor) applyBlock(blk *block.Block, syncingToHeight int64) (appHash 
 	if len(blk.Txs) != len(abciResponse.TxResults) {
 		err = fmt.Errorf("expected tx results length to match size of transactions in block. Expected %d, got %d", len(blk.Txs), len(abciResponse.TxResults))
 		return
+	}
+
+	// 仅在区块实际提交后从交易池移除，避免 ProcessProposal 接受但未形成 QC 时误删导致交易无法被重新提议
+	for _, tx := range blk.Txs {
+		e.txPool.Remove(tx.Hash())
 	}
 
 	for index, txResult := range abciResponse.TxResults {

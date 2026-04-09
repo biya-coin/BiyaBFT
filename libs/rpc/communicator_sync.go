@@ -45,7 +45,11 @@ func (c *Communicator) sync(peer *Peer, headNum uint32, handler HandleBlockStrea
 		var blocks []*block.EscortedBlock
 		for {
 			start := time.Now()
-			client := c.GetRPCClient(peer.ID())
+			client, clientErr := c.GetRPCClient(peer.ID())
+			if clientErr != nil {
+				errCh <- clientErr
+				return
+			}
 			res, err := client.GetBlocksFromNumber(ctx, &pb.GetBlocksFromNumberRequest{BlockNum: uint64(fromNum)})
 			if err != nil {
 				errCh <- err
@@ -113,7 +117,10 @@ func (c *Communicator) findCommonAncestor(peer *Peer, headNum uint32) (uint32, e
 		return headNum, nil
 	}
 
-	client := c.GetRPCClient(peer.ID())
+	client, err := c.GetRPCClient(peer.ID())
+	if err != nil {
+		return 0, err
+	}
 	isOverlapped := func(num uint32) (bool, error) {
 		res, err := client.GetBlockIDByNumber(context.Background(), &pb.GetBlockIDByNumberRequest{BlockNum: uint64(headNum)})
 		if err != nil {
@@ -188,7 +195,11 @@ func (c *Communicator) findCommonAncestor(peer *Peer, headNum uint32) (uint32, e
 func (c *Communicator) syncTxs(peer *Peer) {
 	for i := 0; ; i++ {
 		peer.logger.Debug(fmt.Sprintf("sync txs loop %v", i))
-		client := c.GetRPCClient(peer.ID())
+		client, err := c.GetRPCClient(peer.ID())
+		if err != nil {
+			peer.logger.Debug("failed to get RPC client for txs", "err", err)
+			return
+		}
 		res, err := client.GetTxs(context.Background(), &pb.GetTxsRequest{})
 		if err != nil {
 			peer.logger.Debug("failed to request txs", "err", err)

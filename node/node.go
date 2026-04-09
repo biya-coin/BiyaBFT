@@ -152,8 +152,14 @@ func NewNode(
 	slog.Info("Supernova start ...", "version", config.BaseConfig.Version)
 
 	// Create the proxyApp and establish connections to the ABCI app (consensus, mempool, query).
-	proxyApp, err := createAndStartProxyAppConns(clientCreator, cmtproxy.NopMetrics())
+	slog.Info("Connecting to ABCI app (ensure Cosmos/simd is running on 26658 first)", "proxy_app", config.ProxyApp)
+	connectCtx, connectCancel := context.WithTimeout(ctx, 20*time.Second)
+	defer connectCancel()
+	proxyApp, err := createAndStartProxyAppConnsWithContext(connectCtx, clientCreator, cmtproxy.NopMetrics())
 	if err != nil {
+		if connectCtx.Err() != nil {
+			return nil, fmt.Errorf("ABCI connection timeout after 20s - is Cosmos app running? Start it first: bash scripts/start-cosmos-abci.sh (proxy_app=%s)", config.ProxyApp)
+		}
 		return nil, err
 	}
 
@@ -161,8 +167,13 @@ func NewNode(
 	if err != nil {
 		return nil, err
 	}
-	err = doHandshake(ctx, chain, genDoc, eventBus, proxyApp)
+	handshakeCtx, handshakeCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer handshakeCancel()
+	err = doHandshake(handshakeCtx, chain, genDoc, eventBus, proxyApp)
 	if err != nil {
+		if handshakeCtx.Err() != nil {
+			return nil, fmt.Errorf("ABCI handshake timeout after 15s - app may not be responding (proxy_app=%s): %w", config.ProxyApp, err)
+		}
 		logger.Error("Handshake failed", "err", err)
 		return nil, err
 	}
@@ -227,6 +238,7 @@ func NewNode(
 		p2pSrv:        p2pSrv,
 		logger:        slog.With("pkg", "node"),
 		proxyApp:      proxyApp,
+		mainDB:        mainDB,
 	}
 	go communicator.Start()
 
@@ -239,6 +251,25 @@ func createAndStartProxyAppConns(clientCreator cmtproxy.ClientCreator, metrics *
 		return nil, fmt.Errorf("error starting proxy app connections: %v", err)
 	}
 	return proxyApp, nil
+}
+
+// createAndStartProxyAppConnsWithContext runs proxy start with a timeout so we fail fast if ABCI is unreachable.
+func createAndStartProxyAppConnsWithContext(ctx context.Context, clientCreator cmtproxy.ClientCreator, metrics *cmtproxy.Metrics) (proxy.AppConns, error) {
+	type result struct {
+		app proxy.AppConns
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		app, err := createAndStartProxyAppConns(clientCreator, metrics)
+		done <- result{app, err}
+	}()
+	select {
+	case r := <-done:
+		return r.app, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // getBootstrapNodes 返回用于 discv5 的 bootstrap 节点列表（ENR 或 multiaddr）。
@@ -398,6 +429,18 @@ func (n *Node) Stop() error {
 	return nil
 }
 
+// CloseDB closes the chain database so state is flushed to disk.
+// Call this after Start() returns (e.g. after context cancel on shutdown) to avoid
+// "invalid height: 1; expected: N" on next run when process was killed without flush.
+func (n *Node) CloseDB() {
+	if n.mainDB != nil {
+		if err := n.mainDB.Close(); err != nil {
+			n.logger.Error("closing main DB", "err", err)
+		}
+		n.mainDB = nil
+	}
+}
+
 func (n *Node) handleBlockStream(ctx context.Context, stream <-chan *block.EscortedBlock) (err error) {
 	n.logger.Debug("start to process block stream")
 	defer n.logger.Debug("process block stream done", "err", err)
@@ -462,6 +505,14 @@ func (n *Node) houseKeeping(ctx context.Context) {
 	connectivityTicker := time.NewTicker(time.Second)
 	defer connectivityTicker.Stop()
 
+	// 每分钟打印一次：当前区块高度、以及本分钟出块数（当前高度 - 上次打印时高度）
+	blocksPerMinTicker := time.NewTicker(time.Minute)
+	defer blocksPerMinTicker.Stop()
+	lastHeightForMinute := uint32(0)
+	if best := n.chain.BestBlock(); best != nil {
+		lastHeightForMinute = best.Number()
+	}
+
 	futureBlocks := cache.NewRandCache(32)
 
 	for {
@@ -469,6 +520,27 @@ func (n *Node) houseKeeping(ctx context.Context) {
 		case <-ctx.Done():
 			n.logger.Info("house keeping quite due to ctx done")
 			return
+		case <-blocksPerMinTicker.C:
+			if best := n.chain.BestBlock(); best != nil {
+				cur := best.Number()
+				delta := uint32(0)
+				if cur > lastHeightForMinute {
+					delta = cur - lastHeightForMinute
+				}
+				if delta > 0 {
+					perBlockMs := 60 * 1000 / uint32(delta)
+					n.logger.Error("blocks in last minute", "height", cur, "delta", delta, "blocks_per_min", delta, "per_block_time_ms", perBlockMs)
+				} else {
+					// delta=0: no new blocks; log hint for debugging (not in committee => rely on NotifyBlock; no peers => no sync source)
+					inCommittee := n.pacemaker != nil && n.pacemaker.InCommittee()
+					peerCount := 0
+					if n.communicator != nil {
+						peerCount = n.communicator.PeerCount()
+					}
+					n.logger.Error("blocks in last minute", "height", cur, "delta", delta, "blocks_per_min", delta, "in_committee", inCommittee, "peer_count", peerCount)
+				}
+				lastHeightForMinute = cur
+			}
 		case evt := <-newBlockCh:
 			n.logger.Debug("found new block", "num", evt.NewBlock.Block.Number(), "id", evt.NewBlock.Block.ID())
 			var stats blockStats

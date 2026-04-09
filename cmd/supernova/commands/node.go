@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	cmtcfg "github.com/cometbft/cometbft/v2/config"
 	cmtflags "github.com/cometbft/cometbft/v2/libs/cli/flags"
@@ -17,6 +18,7 @@ import (
 	"github.com/cometbft/cometbft/v2/privval"
 	"github.com/cometbft/cometbft/v2/proxy"
 	cmn "github.com/meterio/supernova/libs/common"
+	"github.com/meterio/supernova/genesis"
 	"github.com/meterio/supernova/node"
 	"github.com/meterio/supernova/types"
 	"github.com/spf13/cobra"
@@ -122,7 +124,8 @@ func RunNodeCmd() *cobra.Command {
 			logger, err = cmtflags.ParseLogLevel(config.LogLevel, logger, cmtcfg.DefaultLogLevel)
 
 			privValidator, _ := privval.LoadOrGenFilePV(config.PrivValidatorKeyFile(), config.PrivValidatorStateFile(), nil)
-			ctx := context.TODO()
+			// Use cancellable context so SIGTERM/CTRL-C can trigger graceful shutdown and DB flush.
+			ctx, cancel := context.WithCancel(context.Background())
 			// For gRPC, use host:port so grpc.NewClient doesn't block on "tcp://" target (cometbft dialer still gets host:port and dials tcp)
 			proxyAddr := config.ProxyApp
 			if config.ABCI == "grpc" && (strings.HasPrefix(proxyAddr, "tcp://") || strings.HasPrefix(proxyAddr, "unix://")) {
@@ -132,7 +135,7 @@ func RunNodeCmd() *cobra.Command {
 				privValidator,
 				nodeKey,
 				proxy.DefaultClientCreator(proxyAddr, config.ABCI, config.DBDir()),
-				cmtnode.DefaultGenesisDocProviderFunc(config),
+				genesis.AppGenesisDocProvider(config),
 				cmtcfg.DefaultDBProvider,
 				cmtnode.DefaultMetricsProvider(config.Instrumentation),
 				logger,
@@ -141,20 +144,21 @@ func RunNodeCmd() *cobra.Command {
 				return err
 			}
 
-			node.Start()
-
-			// Stop upon receiving SIGTERM or CTRL-C.
+			// On SIGTERM/CTRL-C: cancel context so goroutines exit, Start() returns, then we close DB and exit.
 			cmn.TrapSignal(func() {
 				if node.IsRunning() {
-					slog.Info("Node Stopping ... ")
-					if err := node.Stop(); err != nil {
-						slog.Error("unable to stop the node", "error", err)
-					}
+					slog.Info("Node stopping (cancelling context to flush chain DB)...")
+					cancel()
 				}
 			})
 
-			// Run forever.
-			select {}
+			// Start() blocks until context is cancelled and all goroutines are done.
+			_ = node.Start()
+			// Brief delay so communicator and other non-goes goroutines see context cancel before we close DB.
+			time.Sleep(500 * time.Millisecond)
+			node.CloseDB()
+			slog.Info("Node stopped, DB closed.")
+			return nil
 		},
 	}
 	AddNodeFlags(cmd)

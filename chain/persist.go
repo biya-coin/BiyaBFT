@@ -109,6 +109,12 @@ func saveBestBlockID(w cmtdb.DB, id types.Bytes32) error {
 	return w.Set(bestBlockKey, id[:])
 }
 
+// syncBestBlockToDisk forces the best block ID to disk so restart sees correct height
+// even if process is killed without Close(). Reduces "app height > core" after non-graceful exit.
+func syncBestBlockToDisk(w cmtdb.DB, id types.Bytes32) error {
+	return w.SetSync(bestBlockKey, id[:])
+}
+
 func deleteBlockHash(w cmtdb.Batch, num uint32) error {
 	numKey := numberAsKey(num)
 	return w.Delete(append(hashKeyPrefix, numKey...))

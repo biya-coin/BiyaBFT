@@ -88,18 +88,38 @@ func (b *Block) VerifyQC(escortQC *QuorumCert, blsMaster *types.BlsMaster, commi
 		return false, fmt.Errorf("not enough votes (%d/%d)", voteCount, committeeSize)
 	}
 
+	// Native CometBFT bls12_381: individual votes use DST NUL; Prysm FastAggregateVerify uses POP and fails.
+	var nativePKs [][]byte
+	for index, v := range committee.Validators {
+		if !escortQC.BitArray.GetIndex(index) {
+			continue
+		}
+		if len(v.PubKey.Bytes()) != 32 {
+			nativePKs = append(nativePKs, v.PubKey.Bytes())
+		}
+	}
+	if len(nativePKs) > 0 && len(nativePKs) == int(voteCount) {
+		start := time.Now()
+		ok := cmn.VerifyFastAggregateCometBLS(escortQC.AggSig, nativePKs, escortQC.BlockID[:])
+		slog.Debug("verified QC (comet BLS aggregate)", "elapsed", types.PrettyDuration(time.Since(start)))
+		if !ok {
+			return false, nil
+		}
+		return true, nil
+	}
+
 	pubkeys := make([]bls.PublicKey, 0)
 	for index, v := range committee.Validators {
-		if v.PubKey.Type() == "bls12_381" {
-			if escortQC.BitArray.GetIndex(index) {
-				cmnPubkey, err := cmn.PublicKeyFromBytes(v.PubKey.Bytes())
-				if err != nil {
-					// FIXME: implement this
-					panic("unsupported pubkey type")
-				}
-				pubkeys = append(pubkeys, cmnPubkey)
-			}
+		if !escortQC.BitArray.GetIndex(index) {
+			continue
 		}
+		// Support both bls12_381 and ed25519 (Cosmos); ed25519 uses same BLS derivation as vote verification.
+		cmnPubkey, err := cmn.PublicKeyFromBytes(v.PubKey.Bytes())
+		if err != nil {
+			slog.Debug("VerifyQC: skip validator pubkey", "index", index, "type", v.PubKey.Type(), "err", err)
+			continue
+		}
+		pubkeys = append(pubkeys, cmnPubkey)
 	}
 	sig, err := bls.SignatureFromBytes(escortQC.AggSig)
 	if err != nil {

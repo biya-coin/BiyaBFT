@@ -7,9 +7,11 @@ package jsonrpc
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strconv"
 
@@ -67,7 +69,60 @@ func (a *JSONRPCAPI) HandleBroadcastTx(params json.RawMessage) (output json.RawM
 		panic(err)
 	}
 	a.txPool.Add(decodedTx)
-	return json.RawMessage{}, nil
+	// Return a valid ResultBroadcastTx so Cosmos client can decode (hash = SHA256 of tx, same as CometBFT).
+	hash := sha256.Sum256(decodedTx)
+	// CometBFT client (cosmos-sdk) expects result.hash as hex string
+	resultMap := map[string]interface{}{
+		"code":      0,
+		"log":       "",
+		"codespace": "",
+		"data":      nil,
+		"hash":      hex.EncodeToString(hash[:]),
+	}
+	resultBytes, err := json.Marshal(resultMap)
+	if err != nil {
+		return nil, err
+	}
+	return resultBytes, nil
+}
+
+// abciQueryHeight decodes JSON-RPC abci_query "height": Comet HTTP client sends numeric height (JSON number -> float64).
+func abciQueryHeight(v interface{}) (int64, error) {
+	switch x := v.(type) {
+	case nil:
+		return 0, nil
+	case string:
+		if x == "" {
+			return 0, nil
+		}
+		return strconv.ParseInt(x, 10, 64)
+	case float64:
+		return int64(x), nil
+	case json.Number:
+		return x.Int64()
+	case int64:
+		return x, nil
+	case int:
+		return int64(x), nil
+	default:
+		return 0, fmt.Errorf("unsupported height type %T", v)
+	}
+}
+
+func abciQueryProve(v interface{}) bool {
+	b, ok := v.(bool)
+	return ok && b
+}
+
+func abciQueryDataHex(v interface{}) ([]byte, error) {
+	if v == nil {
+		return nil, nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return nil, fmt.Errorf("data must be hex string, got %T", v)
+	}
+	return hex.DecodeString(s)
 }
 
 func (a *JSONRPCAPI) HandleABCIQuery(params json.RawMessage) (output json.RawMessage, err error) {
@@ -77,13 +132,23 @@ func (a *JSONRPCAPI) HandleABCIQuery(params json.RawMessage) (output json.RawMes
 	}
 
 	a.logger.Info("handle ABCI query", "path", m["path"], "data", m["data"], "height", m["height"], "prove", m["prove"])
-	height, _ := strconv.ParseInt(m["height"].(string), 10, 64)
-	databytes, _ := hex.DecodeString(m["data"].(string))
+	height, err := abciQueryHeight(m["height"])
+	if err != nil {
+		return nil, err
+	}
+	databytes, err := abciQueryDataHex(m["data"])
+	if err != nil {
+		return nil, err
+	}
+	path, ok := m["path"].(string)
+	if !ok {
+		return nil, fmt.Errorf("path must be string, got %T", m["path"])
+	}
 	resQuery, err := a.proxyAppQuery.Query(context.TODO(), &cmtabci.QueryRequest{
-		Path:   m["path"].(string),
+		Path:   path,
 		Data:   databytes,
 		Height: height,
-		Prove:  m["prove"].(bool),
+		Prove:  abciQueryProve(m["prove"]),
 	})
 	if err != nil {
 		a.logger.Error("proxy app failed to process query", "err", err)

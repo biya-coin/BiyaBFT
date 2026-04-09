@@ -108,14 +108,16 @@ func New(db cmtdb.DB, verbose bool) (*Chain, error) {
 func (c *Chain) Initialize(gene *genesis.Genesis) error {
 	var bestBlock *block.Block
 
+	c.logger.Info("Initialize: loading best block id")
 	bestBlockID, _ := loadBestBlockID(c.db)
 	if bytes.Equal(bestBlockID.Bytes(), (&types.Bytes32{}).Bytes()) {
 		// could not load bestblock, usually this means chain is not initialized
+		c.logger.Info("Initialize: first-time init, building genesis block")
 		genesisBlock, err := gene.Build()
 		if err != nil {
 			return err
 		}
-		// fmt.Println("GENESIS BLOCK:", genesisBlock)
+		c.logger.Info("Initialize: genesis block built")
 		if genesisBlock.Number() != 0 {
 			return errors.New("genesis number != 0")
 		}
@@ -125,6 +127,10 @@ func (c *Chain) Initialize(gene *genesis.Genesis) error {
 
 		vset := gene.ValidatorSet()
 		nextVSet := gene.NextValidatorSet()
+		// If genesis doc had no validators but app returned updates, vset can be empty; use nextVSet for both to avoid empty set save/load issues.
+		if vset != nil && vset.Size() == 0 && nextVSet != nil && nextVSet.Size() > 0 {
+			vset = nextVSet
+		}
 		genesisEscortQC := block.GenesisEscortQC(genesisBlock, nextVSet.Size())
 
 		if _, err := loadValidatorSet(c.db, vset.Hash()); err != nil {
@@ -134,6 +140,7 @@ func (c *Chain) Initialize(gene *genesis.Genesis) error {
 				return err
 			}
 		}
+		c.logger.Info("Initialize: genesis validator set saved")
 
 		if _, err := loadValidatorSet(c.db, nextVSet.Hash()); err != nil {
 			c.logger.Info("saving genesis next validator set", "hash", hex.EncodeToString(nextVSet.Hash()), "size", nextVSet.Size())
@@ -142,6 +149,7 @@ func (c *Chain) Initialize(gene *genesis.Genesis) error {
 				return err
 			}
 		}
+		c.logger.Info("Initialize: genesis next validator set saved")
 
 		genesisID := genesisBlock.ID()
 		// no genesis yet
@@ -165,9 +173,11 @@ func (c *Chain) Initialize(gene *genesis.Genesis) error {
 			return err
 		}
 
+		c.logger.Info("Initialize: writing batch to db")
 		if err := batch.Write(); err != nil {
 			return err
 		}
+		c.logger.Info("Initialize: batch write done")
 
 		bestBlock = genesisBlock
 		bestHeightGauge.Set(float64(bestBlock.Number()))
@@ -383,10 +393,41 @@ func (c *Chain) AddBlock(newBlock *block.Block, escortQC *block.QuorumCert) (*Fo
 		return nil, err
 	}
 
+	// Force best block to disk so restart sees correct height even after kill (no graceful CloseDB).
+	if isTrunk {
+		if err := syncBestBlockToDisk(c.db, newBlockID); err != nil {
+			c.logger.Error("sync best block to disk", "err", err, "block", newBlockID)
+		}
+	}
+
 	c.caches.rawBlocks.Add(newBlockID, newRawBlock(raw, newBlock))
 
 	c.tick.Broadcast()
 	return fork, nil
+}
+
+// UpdateBlockAppHash persists the app hash for a block already in the chain.
+// Commit flow saves the block before ApplyBlock returns AppHash; this updates the stored block
+// so replay handshake can assert block.AppHash matches app state.
+func (c *Chain) UpdateBlockAppHash(blockID types.Bytes32, appHash cmtbytes.HexBytes) error {
+	raw, err := loadBlockRaw(c.db, blockID)
+	if err != nil {
+		return err
+	}
+	blk, err := block.BlockDecodeFromBytes(raw)
+	if err != nil {
+		return err
+	}
+	blk.BlockHeader.AppHash = appHash
+	newRaw, err := rlp.EncodeToBytes(blk)
+	if err != nil {
+		return err
+	}
+	batch := c.db.NewBatch()
+	if err := saveBlockRaw(batch, blockID, newRaw); err != nil {
+		return err
+	}
+	return batch.Write()
 }
 
 func (c *Chain) IsBlockFinalized(id types.Bytes32) bool {

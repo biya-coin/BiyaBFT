@@ -7,6 +7,8 @@ package genesis
 
 import (
 	"encoding/hex"
+	"fmt"
+	"log/slog"
 	"strconv"
 
 	v2 "github.com/cometbft/cometbft/api/cometbft/abci/v2"
@@ -29,15 +31,22 @@ type Genesis struct {
 }
 
 func NewGenesis(gdoc *cmttypes.GenesisDoc, validatorUpdate []v2.ValidatorUpdate) *Genesis {
+	slog.Info("NewGenesis: start")
 	builder := &Builder{}
+	slog.Info("NewGenesis: SetGenesisDoc", "validators_in_doc", len(gdoc.Validators))
 	builder.SetGenesisDoc(gdoc)
+	slog.Info("NewGenesis: SetValidatorUpdate", "updates", len(validatorUpdate))
 	builder.SetValidatorUpdate(validatorUpdate)
+	slog.Info("NewGenesis: ComputeID")
 	id, err := builder.ComputeID()
 	if err != nil {
 		panic(err)
 	}
 	chainId, err := strconv.ParseUint(gdoc.ChainID, 10, 64)
-
+	if err != nil {
+		panic(fmt.Sprintf("chain_id parse: %v", err))
+	}
+	slog.Info("NewGenesis: done")
 	return &Genesis{builder, id, chainId, "Supernova"}
 }
 

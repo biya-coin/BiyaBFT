@@ -54,6 +54,13 @@ func (p *Pacemaker) ValidateProposal(b *block.DraftBlock) error {
 		}
 	}()
 
+	// Proposer may have already run ProcessProposal in OnBeat; gossip echo uses a new DraftBlock for the same block ID.
+	if existing := p.chain.GetDraft(blk.ID()); existing != nil && existing != b && existing.SuccessProcessed && existing.ProcessError == nil {
+		b.SuccessProcessed = true
+		b.ProcessError = nil
+		return nil
+	}
+
 	// avoid duplicate validation
 	if b.SuccessProcessed && b.ProcessError == nil {
 		return nil
@@ -137,7 +144,20 @@ func (p *Pacemaker) verifyTC(tc *types.TimeoutCert, round uint32) bool {
 			return false
 		}
 
-		// check signature
+		// check signature (native CometBFT bls12_381 uses NUL DST; Prysm aggregate verify uses POP)
+		var nativePKs [][]byte
+		for index, v := range p.epochState.committee.Validators {
+			if !tc.BitArray.GetIndex(index) {
+				continue
+			}
+			if len(v.PubKey.Bytes()) != 32 {
+				nativePKs = append(nativePKs, v.PubKey.Bytes())
+			}
+		}
+		if len(nativePKs) > 0 && len(nativePKs) == int(voteCount) {
+			return cmn.VerifyFastAggregateCometBLS(tc.AggSig, nativePKs, tc.MsgHash[:])
+		}
+
 		for index, v := range p.epochState.committee.Validators {
 			cmnPubkey, err := cmn.PublicKeyFromBytes(v.PubKey.Bytes())
 			if err != nil {
@@ -172,8 +192,12 @@ func (p *Pacemaker) amIRoundProproser(round uint32) bool {
 
 func (p *Pacemaker) SignMessage(msg block.ConsensusMessage) {
 	msgHash := msg.GetMsgHash()
-	sig := p.blsMaster.PrivKey.Sign(msgHash[:])
-	msg.SetMsgSignature(sig.Marshal())
+	// Use Ed25519 (CometBFT validator key) for P2P message auth so verifiers can use validator set pubkey.
+	sig, err := p.blsMaster.CmtPrivKey.Sign(msgHash[:])
+	if err != nil {
+		panic(err)
+	}
+	msg.SetMsgSignature(sig)
 }
 
 func (p *Pacemaker) printFork(fork *chain.Fork) {
