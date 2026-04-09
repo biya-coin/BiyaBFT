@@ -48,8 +48,29 @@ func NewEpochState(c *chain.Chain, leaf *block.Block, myPubKey cmtcrypto.PubKey)
 
 	vset := c.GetNextValidatorSet(kblk.Number())
 	if vset == nil {
-		slog.Error("Could not get next validator set", "num", kblk.Number())
-		return nil, errors.New("could not get next validator set")
+		// 重启时 ValidatorSetRegistry.SaveValidatorSet 可能从未将 validator set 写入 BiyaBFT mainDB
+		// （block 不是 KBlock 且无 validator update）。从 InitChainResponse 重建 genesis 验证人集。
+		logger.Warn("GetNextValidatorSet returned nil, trying InitChainResponse fallback", "kblkNum", kblk.Number())
+		initResp, initErr := c.GetInitChainResponse()
+		if initResp != nil && len(initResp.Validators) > 0 {
+			adapter := &cmn.ValidatorSetAdapter{Validators: make([]*cmttypes.Validator, 0)}
+			for _, update := range initResp.Validators {
+				pubkey, decErr := decodeValidatorPubKey(update)
+				if decErr != nil {
+					logger.Warn("skip validator in InitChainResponse", "err", decErr)
+					continue
+				}
+				adapter.Upsert(&cmttypes.Validator{PubKey: pubkey, VotingPower: update.Power})
+			}
+			vset = adapter.ToValidatorSet()
+		}
+		if vset == nil || vset.Size() == 0 {
+			slog.Error("Could not get next validator set", "num", kblk.Number(), "initErr", initErr)
+			return nil, errors.New("could not get next validator set")
+		}
+		// 将重建的 vset 存入 DB，后续读取可直接从 DB 获取
+		c.SaveValidatorSet(vset)
+		logger.Info("rebuilt validator set from InitChainResponse saved to DB", "size", vset.Size())
 	}
 	vsetAdapter := cmn.NewValidatorSetAdapter(vset)
 	vsetAdapter.SortWithNonce(kblk.Nonce())

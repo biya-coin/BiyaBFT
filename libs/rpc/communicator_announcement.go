@@ -60,7 +60,11 @@ func (c *Communicator) fetchBlockByID(peerID peer.ID, newBlockID types.Bytes32) 
 		return
 	}
 
-	client := c.GetRPCClient(peerID)
+	client, err := c.GetRPCClient(peerID)
+	if err != nil {
+		c.logger.Debug("failed to get RPC client for fetchBlockByID", "err", err)
+		return
+	}
 	res, err := client.GetBlockByID(context.Background(), &pb.GetBlockByIDRequest{BlockIdBytes: newBlockID.Bytes()})
 	if err != nil {
 		c.logger.Debug("failed to get block by id", "err", err)

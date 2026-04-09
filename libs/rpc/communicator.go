@@ -117,15 +117,14 @@ func (c *Communicator) Disconnected(network network.Network, conn network.Conn) 
 	c.logger.Info("Peer disconnected", "peer", conn.RemotePeer())
 }
 
-func (c *Communicator) GetRPCClient(peerID peer.ID) pb.DRPCSyncClient {
+func (c *Communicator) GetRPCClient(peerID peer.ID) (pb.DRPCSyncClient, error) {
 	stream, err := c.p2pSrv.Host().NewStream(c.ctx, peerID, "sync")
 	if err != nil {
-		fmt.Println("can't establish stream")
+		return nil, fmt.Errorf("can't establish stream to %s: %w", peerID, err)
 	}
 	conn := drpcconn.New(stream)
 	client := pb.NewDRPCSyncClient(conn)
-
-	return client
+	return client, nil
 }
 
 func (c *Communicator) Start() {
@@ -239,7 +238,11 @@ func (c *Communicator) runPeer(peer *Peer, dir string) {
 	// ctx, cancel := context.WithTimeout(c.ctx, time.Second*5)
 	// defer cancel()
 
-	client := c.GetRPCClient(peer.ID())
+	client, err := c.GetRPCClient(peer.ID())
+	if err != nil {
+		c.logger.Warn("Failed to get RPC client", "peer", peer.ID(), "err", err)
+		return
+	}
 	defer client.DRPCConn().Close()
 
 	res, err := client.GetStatus(context.Background(), &pb.GetStatusRequest{})
@@ -316,13 +319,12 @@ func (c *Communicator) BroadcastBlock(blk *block.EscortedBlock) {
 		peer := peer
 		peer.MarkBlock(blk.Block.ID())
 		c.goes.Go(func() {
-			defer func() {
-				if r := recover(); r != nil {
-					peer.logger.Error("drpc send recovered from panic: %v", "err", r)
-				}
-			}()
 			c.logger.Info(fmt.Sprintf("propagate %s to %s", blk.Block.CompactString(), peer.ID()))
-			client := c.GetRPCClient(peer.ID())
+			client, err := c.GetRPCClient(peer.ID())
+			if err != nil {
+				peer.logger.Warn("Failed to get RPC client for propagate", "err", err)
+				return
+			}
 
 			if _, err := client.NotifyBlock(context.Background(), &pb.NotifyBlockRequest{PeerId: myPeerID.String(), BlockBytes: bbytes}); err != nil {
 				msg := fmt.Sprintf("Failed to propagate %s", blk.Block.CompactString())
@@ -339,13 +341,12 @@ func (c *Communicator) BroadcastBlock(blk *block.EscortedBlock) {
 		peer := peer
 		peer.MarkBlock(blk.Block.ID())
 		c.goes.Go(func() {
-			defer func() {
-				if r := recover(); r != nil {
-					peer.logger.Error("drpc send recovered from panic: %v", "err", r)
-				}
-			}()
 			c.logger.Info(fmt.Sprintf("announce %s to %s", blk.Block.CompactString(), peer.ID()))
-			client := c.GetRPCClient(peer.ID())
+			client, err := c.GetRPCClient(peer.ID())
+			if err != nil {
+				peer.logger.Warn("Failed to get RPC client for announce", "err", err)
+				return
+			}
 
 			if _, err := client.NotifyBlockID(context.Background(), &pb.NotifyBlockIDRequest{PeerId: myPeerID.String(), BlockIdBytes: blkID[:]}); err != nil {
 				msg := fmt.Sprintf("Failed to announce %s", blk.Block.CompactString())

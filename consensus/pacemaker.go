@@ -639,10 +639,52 @@ func (p *Pacemaker) Regulate() {
 
 	bestNode := p.chain.GetDraftByEscortQC(bestQC)
 	if bestNode == nil {
-		p.logger.Debug("started with empty qcNode")
+		// 首次启动或 reset 后内存 Draft 缓存为空，GetDraftByEscortQC 返回 nil。
+		// 用 best block 构造一个合成的 DraftBlock 作为兜底，避免后续解引用 nil。
+		p.logger.Info("started with empty draft cache, synthesizing genesis draft from best block", "best", best.Number())
+		bestNode = &block.DraftBlock{
+			Height:        best.Number(),
+			Round:         bestQC.Round,
+			ProposedBlock: best,
+			Committed:     true,
+		}
 	}
 
-	p.updateEpochState(bestNode.ProposedBlock)
+	if !p.updateEpochState(bestNode.ProposedBlock) {
+		// stop+restart 时，ValidatorSetRegistry 从未将 validator set 写入 BiyaBFT mainDB，
+		// 直接从 InitChainResponse 重建 genesis 验证人集，绕过 DB key 对不上的问题。
+		p.logger.Warn("updateEpochState failed, rebuilding EpochState from InitChainResponse")
+		initResp, err := p.chain.GetInitChainResponse()
+		if err != nil || initResp == nil {
+			p.logger.Error("GetInitChainResponse failed, regulate aborted", "err", err)
+			return
+		}
+		vsetAdapter := &cmn.ValidatorSetAdapter{Validators: make([]*cmttypes.Validator, 0)}
+		for _, update := range initResp.Validators {
+			pubkey, decErr := decodeValidatorPubKey(update)
+			if decErr != nil {
+				p.logger.Warn("failed to decode validator pubkey", "err", decErr)
+				continue
+			}
+			vsetAdapter.Upsert(&cmttypes.Validator{PubKey: pubkey, VotingPower: update.Power})
+		}
+		rebuiltVSet := vsetAdapter.ToValidatorSet()
+		if rebuiltVSet == nil || rebuiltVSet.Size() == 0 {
+			p.logger.Error("rebuilt validator set is empty, regulate aborted")
+			return
+		}
+		var curEpoch uint64
+		if p.epochState != nil {
+			curEpoch = p.epochState.epoch
+		}
+		state, err := NewPendingEpochState(rebuiltVSet, p.blsMaster.PubKey, curEpoch)
+		if err != nil || state == nil {
+			p.logger.Error("NewPendingEpochState failed, regulate aborted", "err", err)
+			return
+		}
+		p.epochState = state
+		p.logger.Info("fallback EpochState constructed from InitChainResponse", "inCommittee", state.inCommittee, "epoch", state.epoch, "size", rebuiltVSet.Size())
+	}
 
 	round := bestQC.Round
 	actualRound := round + 1
@@ -672,7 +714,7 @@ func (p *Pacemaker) mainLoop() {
 
 	for {
 		bestBlock := p.chain.BestBlock()
-		if bestBlock.Number() > p.QCHigh.QC.Number() && p.epochState.InCommittee() {
+		if p.QCHigh != nil && bestBlock.Number() > p.QCHigh.QC.Number() && p.epochState != nil && p.epochState.InCommittee() {
 			p.logger.Info("bestBlock > QCHigh, schedule regulate", "best", bestBlock.Number(), "qcHigh", p.QCHigh.QC.Number())
 			p.scheduleRegulate()
 		}
@@ -757,6 +799,10 @@ func (p *Pacemaker) OnRoundTimeout(ti PMRoundTimeoutInfo) {
 func (p *Pacemaker) enterRound(round uint32, rtype roundType) bool {
 	if round > 0 && round < p.currentRound {
 		p.logger.Warn(fmt.Sprintf("update round skipped %d->%d", p.currentRound, round))
+		return false
+	}
+	if p.epochState == nil {
+		p.logger.Error("epochState is nil, cannot enter round", "round", round)
 		return false
 	}
 	if !p.epochState.InCommittee() {
