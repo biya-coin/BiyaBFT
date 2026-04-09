@@ -27,12 +27,24 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// Round/block timing: round timeout must exceed CreateLeaf 的「睡到 parent+BlockIntervalNano」，
+// 否则提议者睡眠期间会误触发 OnRoundTimeout。BlockIntervalNano 见 types/params.go。
 const (
-	RoundInterval        = 2 * time.Second
-	RoundTimeoutInterval = RoundInterval * 4 // round timeout 8 secs.
-	ProposeTimeLimit     = 1300 * time.Millisecond
-	BroadcastTimeLimit   = 1400 * time.Millisecond
+	RoundTimeoutMultiplier = 1 // round timeout = roundTimeoutBase() * 2^power (power from timeoutCounter)
+	ProposeTimeLimit       = 10 * time.Millisecond
+	BroadcastTimeLimit     = 10 * time.Millisecond
 )
+
+// roundTimeoutBase 为首轮超时；与 types.BlockIntervalNano 联动，避免慢出块时 30ms 超时打爆轮次。
+func roundTimeoutBase() time.Duration {
+	bi := time.Duration(types.BlockIntervalNano)
+	// 极短间隔（开发/压测）仍可用约 30ms 级超时
+	if bi < 50*time.Millisecond {
+		return 30 * time.Millisecond
+	}
+	// 提议最多睡到 parent+BI，再加投票与网络余量
+	return bi + bi/2
+}
 
 var (
 	validQCs, _        = lru.New(256)
@@ -135,7 +147,7 @@ func (p *Pacemaker) CreateLeaf(parent *block.DraftBlock, justify *block.DraftQC,
 		return ErrParentBlockEmpty, nil
 	}
 
-	targetTime := time.Unix(0, int64(parentBlock.NanoTimestamp()+200))
+	targetTime := time.Unix(0, int64(parentBlock.NanoTimestamp()+types.BlockIntervalNano))
 	now := time.Now()
 	if now.After(targetTime) {
 		targetTime = now
@@ -173,6 +185,35 @@ func (p *Pacemaker) CreateLeaf(parent *block.DraftBlock, justify *block.DraftQC,
 		time.Sleep(time.Until(targetTime))
 	}
 	return err, draftBlock
+}
+
+// draftEscortingQC returns the DraftBlock escorting qc, or a synthetic genesis-tip draft when
+// proposalMap is cold (same case as Regulate). Without this, OnBeat/OnPropose see nil at height 0.
+func (p *Pacemaker) draftEscortingQC(qc *block.QuorumCert) *block.DraftBlock {
+	if qc == nil {
+		return nil
+	}
+	b := p.chain.GetDraftByEscortQC(qc)
+	if b != nil {
+		return b
+	}
+	bestQC := p.chain.BestQC()
+	best := p.chain.BestBlock()
+	if best == nil || bestQC == nil {
+		return nil
+	}
+	if p.QCHigh != nil && p.QCHigh.QC != nil && p.QCHigh.QC.Number() > bestQC.Number() {
+		bestQC = p.QCHigh.QC
+	}
+	if qc.Number() == bestQC.Number() && qc.Round == bestQC.Round {
+		return &block.DraftBlock{
+			Height:        best.Number(),
+			Round:         bestQC.Round,
+			ProposedBlock: best,
+			Committed:     true,
+		}
+	}
+	return nil
 }
 
 // b_exec <- b_lock <- b <- b' <- bnew*
@@ -455,7 +496,7 @@ func (p *Pacemaker) OnReceiveVote(mi IncomingMsg) {
 }
 
 func (p *Pacemaker) OnPropose(qc *block.DraftQC, round uint32) *block.DraftBlock {
-	parent := p.chain.GetDraftByEscortQC(qc.QC)
+	parent := p.draftEscortingQC(qc.QC)
 	err, bnew := p.CreateLeaf(parent, qc, round)
 	if err != nil || bnew == nil {
 		if err != nil {
@@ -518,7 +559,7 @@ func (p *Pacemaker) OnBeat(epoch uint64, round uint32) {
 	// parent already got QC, pre-commit it
 
 	//b := p.QCHigh.QCNode
-	b := p.chain.GetDraftByEscortQC(p.QCHigh.QC)
+	b := p.draftEscortingQC(p.QCHigh.QC)
 	if b == nil {
 		return
 	}
@@ -533,16 +574,20 @@ func (p *Pacemaker) OnBeat(epoch uint64, round uint32) {
 		// create slot in proposalMap directly, instead of sendmsg to self.
 		p.chain.AddDraft(bnew)
 
+		// Must run ABCI ProcessProposal before broadcast so BaseApp OE hash matches FinalizeBlock (proposer path
+		// does not rely on receiving own proposal from gossip).
+		if err := p.ValidateProposal(bnew); err != nil {
+			p.logger.Error("validate own proposal failed", "err", err)
+			return
+		}
+
 		p.TCHigh = nil
 
 		//send proposal to every committee members including myself
 		// p.sendMsg(bnew.Msg, true)
 
-		roundElapsed := time.Since(p.roundStartedAt)
-		roundWait := BroadcastTimeLimit - roundElapsed
-		// send vote message to next proposer
-		p.logger.Debug("schedule broadcast with wait", "wait", roundWait)
-		p.scheduleBroadcast(bnew.Msg.(*block.PMProposalMessage), roundWait)
+		// Broadcast immediately for lowest latency; no artificial delay (roundWait=0 triggers instant send in scheduleBroadcast).
+		p.scheduleBroadcast(bnew.Msg.(*block.PMProposalMessage), 0)
 	}
 }
 
@@ -556,14 +601,18 @@ func (p *Pacemaker) OnReceiveTimeout(mi IncomingMsg) {
 		return
 	}
 
-	// collect vote and see if QC is formed
-	newQC, commitInfo := p.epochState.AddQCVote(msg.SignerIndex, msg.LastVoteRound, msg.LastVoteBlockID, msg.LastVoteSignature, msg.LastVoteExtension, msg.LastExtensionSignature, msg.LastNonRpVoteExtension, msg.LastNonRpExtensionSignature)
-	if newQC != nil {
-		escortQCNode := p.chain.GetDraftByEscortQC(newQC)
-		p.UpdateQCHigh(&block.DraftQC{QCNode: escortQCNode, QC: newQC})
-		p.Update(newQC)
+	// collect last-vote only when present (sender may have timed out without voting in that round)
+	if len(msg.LastVoteSignature) >= 96 {
+		newQC, commitInfo := p.epochState.AddQCVote(msg.SignerIndex, msg.LastVoteRound, msg.LastVoteBlockID, msg.LastVoteSignature, msg.LastVoteExtension, msg.LastExtensionSignature, msg.LastNonRpVoteExtension, msg.LastNonRpExtensionSignature)
+		if newQC != nil {
+			escortQCNode := p.chain.GetDraftByEscortQC(newQC)
+			p.UpdateQCHigh(&block.DraftQC{QCNode: escortQCNode, QC: newQC})
+			p.Update(newQC)
+		}
+		if commitInfo != nil {
+			commitInfoCache.Add(msg.LastVoteBlockID.String(), commitInfo)
+		}
 	}
-	commitInfoCache.Add(msg.LastVoteBlockID.String(), commitInfo)
 
 	qc := msg.DecodeQCHigh()
 	qcNode := p.chain.GetDraftByEscortQC(qc)
@@ -618,6 +667,11 @@ func (p *Pacemaker) updateEpochState(leaf *block.Block) bool {
 
 	p.epochState = epochState
 	return true
+}
+
+// InCommittee returns whether this node is in the current consensus committee (can vote and commit from proposals).
+func (p *Pacemaker) InCommittee() bool {
+	return p.epochState != nil && p.epochState.InCommittee()
 }
 
 func (p *Pacemaker) Start() {
@@ -729,6 +783,9 @@ func (p *Pacemaker) mainLoop() {
 			}
 
 		case ti := <-p.roundTimeoutCh:
+			if p.epochState == nil {
+				continue
+			}
 			if ti.epoch < p.epochState.epoch {
 				p.logger.Info("skip timeout handling due to epoch mismatch", "timeoutRound", ti.round, "timeoutEpoch", ti.epoch, "myEpoch", p.epochState.epoch)
 				continue
@@ -750,9 +807,9 @@ func (p *Pacemaker) mainLoop() {
 			p.OnBeat(b.epoch, b.round)
 
 		case m := <-inQueue.queue:
-			// if not in committee, skip rcvd messages
-			if !(p.epochState.InCommittee() || p.nextEpochState != nil && p.nextEpochState.InCommittee()) {
-				p.logger.Debug("skip handling msg bcuz I'm not in committee", "type", m.Msg.GetType())
+			// if not in committee, skip rcvd messages (this node only gets blocks via NotifyBlock from validators)
+			if p.epochState == nil || !(p.epochState.InCommittee() || p.nextEpochState != nil && p.nextEpochState.InCommittee()) {
+				p.logger.Info("skip handling msg (not in committee, blocks come from NotifyBlock only)", "type", m.Msg.GetType())
 				continue
 			}
 			if m.Msg.GetEpoch() != p.epochState.epoch {
@@ -780,8 +837,12 @@ func (p *Pacemaker) mainLoop() {
 }
 
 func (p *Pacemaker) OnRoundTimeout(ti PMRoundTimeoutInfo) {
+	if p.epochState == nil {
+		return
+	}
 	if ti.epoch < p.epochState.epoch {
 		p.logger.Warn(fmt.Sprintf("E:%d,R:%d timeout, but epoch mismatch, ignored ...", ti.epoch, ti.round), "curEpoch", p.epochState.epoch)
+		return
 	}
 	p.logger.Warn(fmt.Sprintf("E:%d,R:%d timeout", ti.epoch, ti.round), "counter", p.timeoutCounter)
 
@@ -797,6 +858,9 @@ func (p *Pacemaker) OnRoundTimeout(ti PMRoundTimeoutInfo) {
 }
 
 func (p *Pacemaker) enterRound(round uint32, rtype roundType) bool {
+	if p.epochState == nil {
+		return false
+	}
 	if round > 0 && round < p.currentRound {
 		p.logger.Warn(fmt.Sprintf("update round skipped %d->%d", p.currentRound, round))
 		return false
@@ -845,7 +909,7 @@ func (p *Pacemaker) resetRoundTimer(round uint32, rtype roundType) time.Duration
 	}
 	// start round timer
 	if p.roundTimer == nil {
-		baseInterval := RoundTimeoutInterval
+		baseInterval := roundTimeoutBase()
 		switch rtype {
 		case RegularRound:
 			p.timeoutCounter = 0

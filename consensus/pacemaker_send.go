@@ -52,12 +52,12 @@ func (p *Pacemaker) BuildProposalMessage(height, round uint32, bnew *block.Draft
 func (p *Pacemaker) BuildVoteMessage(proposalMsg *block.PMProposalMessage, voteExtension []byte, nonRpVoteExtension []byte) (*block.PMVoteMessage, error) {
 	proposedBlock := proposalMsg.DecodeBlock()
 	voteHash := proposedBlock.ID()
-	voteSig := p.blsMaster.SignMessage(voteHash[:])
-	// p.logger.Debug("Built PMVoteMessage", "signMsg", signMsg)
+	// Use Ed25519-derived BLS so verifiers can derive BLS pub from validator set (Cosmos Ed25519 keys).
+	voteSig := p.blsMaster.SignVoteWithDerivedBLS(voteHash[:])
 
 	extensionMsgHash := types.GetMsgHashForVoteExtension(p.epochState.epoch, proposedBlock.ID().Bytes(), voteExtension)
-	extensionSignature := p.blsMaster.SignMessage(extensionMsgHash)
-	nonRpExtensionSignature := p.blsMaster.SignMessage(nonRpVoteExtension)
+	extensionSignature := p.blsMaster.SignVoteWithDerivedBLS(extensionMsgHash)
+	nonRpExtensionSignature := p.blsMaster.SignVoteWithDerivedBLS(nonRpVoteExtension)
 
 	msg := &block.PMVoteMessage{
 		NanoTimestamp: uint64(time.Now().UnixNano()),
@@ -66,12 +66,12 @@ func (p *Pacemaker) BuildVoteMessage(proposalMsg *block.PMProposalMessage, voteE
 
 		VoteRound:     proposalMsg.Round,
 		VoteBlockID:   proposedBlock.ID(),
-		VoteSignature: voteSig.Marshal(),
+		VoteSignature: voteSig,
 
 		VoteExtension:           voteExtension,
-		ExtensionSignature:      extensionSignature.Marshal(),
+		ExtensionSignature:      extensionSignature,
 		NonRpVoteExtension:      nonRpVoteExtension,
-		NonRpExtensionSignature: nonRpExtensionSignature.Marshal(),
+		NonRpExtensionSignature: nonRpExtensionSignature,
 	}
 
 	// sign message
@@ -92,7 +92,7 @@ func (p *Pacemaker) BuildTimeoutMessage(qcHigh *block.DraftQC, ti *PMRoundTimeou
 
 	// TODO: changed from nextHeight/nextRound to ti.height/ti.round, not sure if this is correct
 	wishVoteHash := BuildTimeoutVotingHash(ti.epoch, ti.round)
-	wishVoteSig := p.blsMaster.SignMessage(wishVoteHash[:])
+	wishVoteSig := p.blsMaster.SignVoteWithDerivedBLS(wishVoteHash[:])
 
 	rawQC, err := rlp.EncodeToBytes(qcHigh.QC)
 	if err != nil {
@@ -108,7 +108,7 @@ func (p *Pacemaker) BuildTimeoutMessage(qcHigh *block.DraftQC, ti *PMRoundTimeou
 		QCHigh: rawQC,
 
 		WishVoteHash: wishVoteHash,
-		WishVoteSig:  wishVoteSig.Marshal(),
+		WishVoteSig:  wishVoteSig,
 	}
 
 	// attach last vote
@@ -243,8 +243,8 @@ func (p *Pacemaker) AddIncoming(mi IncomingMsg) {
 		}
 
 	} else {
-		time.AfterFunc(time.Second, func() {
-			p.logger.Info(fmt.Sprintf("future message %s in epoch %d, process after 1s ...", msg.GetType(), msg.GetEpoch()), "curEpoch", p.epochState.epoch)
+		time.AfterFunc(300*time.Millisecond, func() {
+			p.logger.Info(fmt.Sprintf("future message %s in epoch %d, process after 300ms ...", msg.GetType(), msg.GetEpoch()), "curEpoch", p.epochState.epoch)
 			p.AddIncoming(mi)
 		})
 	}

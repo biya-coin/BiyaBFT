@@ -19,6 +19,7 @@ import (
 	cmtflags "github.com/cometbft/cometbft/v2/libs/cli/flags"
 	cmtlog "github.com/cometbft/cometbft/v2/libs/log"
 	cmtnode "github.com/cometbft/cometbft/v2/node"
+	"github.com/meterio/supernova/genesis"
 	node "github.com/meterio/supernova/node"
 
 	"github.com/meterio/supernova/types"
@@ -99,7 +100,7 @@ func main() {
 		pv,
 		nodeKey,
 		proxy.NewLocalClientCreator(app),
-		cmtnode.DefaultGenesisDocProviderFunc(config),
+		genesis.AppGenesisDocProvider(config),
 		cfg.DefaultDBProvider,
 		cmtnode.DefaultMetricsProvider(config.Instrumentation),
 		logger,

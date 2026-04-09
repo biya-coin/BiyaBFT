@@ -62,9 +62,8 @@ func (p *Pacemaker) buildBlock(nanoTimestamp uint64, parent *block.DraftBlock, j
 		Parent:        parent,
 		Justify:       justify,
 		ProposedBlock: newBlock,
-
-		SuccessProcessed: true,
-		ProcessError:     nil,
+		// SuccessProcessed must stay false until executor.ProcessProposal runs (OnBeat / OnReceiveProposal).
+		// Marking true here skipped ABCI ProcessProposal and broke BaseApp optimistic execution (OE hash mismatch).
 	}
 
 	return nil, proposed

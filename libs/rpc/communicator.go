@@ -181,16 +181,16 @@ func (c *Communicator) Sync(handler HandleBlockStream) {
 					return num >= best.Number()
 				})
 				if peer == nil {
-					c.logger.Warn("no suitable peer")
-					// original setting was 3, changed to 1 for cold start
+					// Single-node or no peers: avoid spamming Warn every tick
 					if c.peerSet.Len() < 1 {
-						c.logger.Debug("no suitable peer to sync")
+						c.logger.Debug("no suitable peer (single-node or no peers)")
 						break
 					}
+					c.logger.Warn("no suitable peer")
 					// if more than 3 peers connected, we are assumed to be the best
 					c.logger.Debug("synchronization done, best assumed")
 				} else {
-					c.logger.Info("sync from ", peer)
+					c.logger.Info("sync from", "peer", peer.ID().String())
 					if err := c.sync(peer, best.Number(), handler); err != nil {
 						peer.logger.Debug("synchronization failed", "err", err)
 						break
@@ -329,7 +329,7 @@ func (c *Communicator) BroadcastBlock(blk *block.EscortedBlock) {
 			if _, err := client.NotifyBlock(context.Background(), &pb.NotifyBlockRequest{PeerId: myPeerID.String(), BlockBytes: bbytes}); err != nil {
 				msg := fmt.Sprintf("Failed to propagate %s", blk.Block.CompactString())
 				if isTransientStreamError(err) {
-					peer.logger.Warn(msg, "err", err)
+					peer.logger.Debug(msg, "peer", peer.ID(), "err", err)
 				} else {
 					peer.logger.Error(msg, "err", err)
 				}
@@ -351,7 +351,7 @@ func (c *Communicator) BroadcastBlock(blk *block.EscortedBlock) {
 			if _, err := client.NotifyBlockID(context.Background(), &pb.NotifyBlockIDRequest{PeerId: myPeerID.String(), BlockIdBytes: blkID[:]}); err != nil {
 				msg := fmt.Sprintf("Failed to announce %s", blk.Block.CompactString())
 				if isTransientStreamError(err) {
-					peer.logger.Warn(msg, "err", err)
+					peer.logger.Debug(msg, "peer", peer.ID(), "err", err)
 				} else {
 					peer.logger.Error(msg, "err", err)
 				}

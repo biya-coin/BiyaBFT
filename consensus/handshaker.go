@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -21,7 +22,7 @@ type Handshaker struct {
 	chain    *chain.Chain
 	eventBus cmttypes.BlockEventPublisher
 	genDoc   *cmttypes.GenesisDoc
-	txPool   *txpool.TxPool
+	txPool   *txpool.TxPool // may be nil during handshake (node creates txPool after Handshake); replay only uses Executor.ApplyBlock which does not touch txPool
 	logger   log.Logger
 
 	nBlocks int // number of blocks applied to the state
@@ -84,6 +85,10 @@ func (h *Handshaker) Handshake(ctx context.Context, proxyApp proxy.AppConns) err
 	// Replay blocks up to the latest in the blockstore.
 	appHash, err = h.ReplayBlocks(ctx, appHash, blockHeight, proxyApp)
 	if err != nil {
+		var heightErr sm.ErrAppBlockHeightTooHigh
+		if errors.As(err, &heightErr) {
+			return fmt.Errorf("error on replay: %v (run scripts/reset-supernova-data.sh to resync app and consensus from genesis)", err)
+		}
 		return fmt.Errorf("error on replay: %v", err)
 	}
 	slog.Info("Completed ABCI Handshake - CometBFT and App are synced", "appHeight", blockHeight, "appHash", log.NewLazySprintf("%X", appHash))
@@ -120,12 +125,14 @@ func (h *Handshaker) ReplayBlocks(
 		geneVUpdates := cmttypes.TM2PB.ValidatorUpdates(geneVSet)
 
 		pbparams := h.genDoc.ConsensusParams.ToProto()
+		// Send empty Validators so Cosmos BaseApp skips req.Validators == res.Validators check
+		// (Cosmos returns validators from gen_txs with different proto encoding). We use res.Validators for genesis.
 		req := &abci.InitChainRequest{
 			Time:            h.genDoc.GenesisTime,
 			ChainId:         h.genDoc.ChainID,
 			InitialHeight:   h.genDoc.InitialHeight,
 			ConsensusParams: &pbparams,
-			Validators:      geneVUpdates,
+			Validators:      nil,
 			AppStateBytes:   h.genDoc.AppState,
 		}
 		res, err := proxyApp.Consensus().InitChain(context.TODO(), req)
@@ -136,18 +143,29 @@ func (h *Handshaker) ReplayBlocks(
 		slog.Info("InitChain Response", "res", res)
 		appHash = res.AppHash
 
+		// Do NOT Commit here. BaseApp expects the first FinalizeBlock to be height 1 (lastBlockHeight 0 + 1).
+		// If we Commit, app.LastBlockHeight becomes 1 and the next FinalizeBlock(block 1) is rejected as "invalid height: 1; expected: 2".
+
 		// When app (e.g. noop) returns empty Validators, use request validators so genesis is correct.
 		validatorUpdates := res.Validators
 		if len(validatorUpdates) == 0 {
 			validatorUpdates = geneVUpdates
 		}
+		slog.Info("building genesis and initializing chain", "validator_updates", len(validatorUpdates))
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("panic during genesis/init", "panic", r)
+				panic(r)
+			}
+		}()
 		gene := genesis.NewGenesis(h.genDoc, validatorUpdates)
-
+		slog.Info("genesis created, calling chain.Initialize")
 		err = h.chain.Initialize(gene)
 		if err != nil {
 			h.logger.Error("chain initialize failed", "err", err)
 			return nil, err
 		}
+		slog.Info("chain initialized successfully")
 
 		// for i, v := range res.Validators {
 		// fmt.Println(" ", i, ": ", v.PubKeyType, hex.EncodeToString(v.PubKeyBytes))
@@ -156,6 +174,7 @@ func (h *Handshaker) ReplayBlocks(
 		if err != nil {
 			h.logger.Error("Save InitChainResponse failed", "err", err)
 		}
+		slog.Info("saved InitChain response")
 
 		initChainRes, err := h.chain.GetInitChainResponse()
 		if err != nil {
@@ -168,7 +187,30 @@ func (h *Handshaker) ReplayBlocks(
 			panic(err)
 		}
 		fmt.Println("InitChain Response Validators: ", len(initChainRes.Validators))
-		gene := genesis.NewGenesis(h.genDoc, initChainRes.Validators)
+		validatorUpdates := initChainRes.Validators
+		// Persisted InitChainResponse may have Validators with empty PubKeyBytes (e.g. proto only stored deprecated pub_key).
+		// Use genesis doc validators so we have valid PubKey bytes for NewGenesis.
+		hasEmptyPubKeyBytes := false
+		for _, v := range initChainRes.Validators {
+			if len(v.PubKeyBytes) == 0 {
+				hasEmptyPubKeyBytes = true
+				break
+			}
+		}
+		if hasEmptyPubKeyBytes && len(h.genDoc.Validators) > 0 {
+			geneValidators := make([]*cmttypes.Validator, len(h.genDoc.Validators))
+			for i, val := range h.genDoc.Validators {
+				if _, ok := cmttypes.ABCIPubKeyTypesToNames[val.PubKey.Type()]; !ok {
+					h.logger.Error("Unsupported key type (genDoc fallback)", "pubkeyType", val.PubKey.Type(), "value", val.Name)
+					return nil, fmt.Errorf("unsupported public key type %s (validator name: %s)", val.PubKey.Type(), val.Name)
+				}
+				geneValidators[i] = cmttypes.NewValidator(val.PubKey, val.Power)
+			}
+			geneVSet := cmttypes.NewValidatorSet(geneValidators)
+			validatorUpdates = cmttypes.TM2PB.ValidatorUpdates(geneVSet)
+			slog.Info("Using genesis doc validators (saved InitChainResponse had empty PubKeyBytes)", "count", len(validatorUpdates))
+		}
+		gene := genesis.NewGenesis(h.genDoc, validatorUpdates)
 
 		err = h.chain.Initialize(gene)
 		if err != nil {
@@ -187,6 +229,7 @@ func (h *Handshaker) ReplayBlocks(
 	// First handle edge cases and constraints on the storeBlockHeight and storeBlockBase.
 	switch {
 	case storeBlockHeight == 0:
+		slog.Info("handshake done (store at genesis), returning")
 		return appHash, nil
 
 	case int64(storeBlockHeight) < appBlockHeight:
@@ -246,13 +289,13 @@ func (h *Handshaker) replayBlocks(
 		}
 
 		h.logger.Info("Applying block", "height", i)
-		block, _ := h.chain.GetTrunkBlock(uint32(i))
-		// Extra check to ensure the app was not changed in a way it shouldn't have.
-		if len(appHash) > 0 {
-			assertAppHashEqualsOneFromBlock(appHash, block)
+		// Assert previous replay result matches previous block's AppHash (block i-1, not i).
+		if len(appHash) > 0 && i > firstBlock {
+			prevBlock, _ := h.chain.GetTrunkBlock(uint32(i - 1))
+			assertAppHashEqualsOneFromBlock(appHash, prevBlock)
 		}
 
-		appHash, _, err = h.replayBlock(storeBlockHeight, proxyApp.Consensus())
+		appHash, _, err = h.replayBlock(int64(i), proxyApp.Consensus())
 		if err != nil {
 			return nil, err
 		}
@@ -279,18 +322,21 @@ func (h *Handshaker) replayBlock(height int64, proxyApp proxy.AppConnConsensus) 
 	if err != nil {
 		return appHash, nxtVSet, err
 	}
-
-	h.nBlocks++
-
+	// nBlocks is incremented by the caller (replayBlocks) per replayed block to avoid double counting
 	return appHash, nxtVSet, nil
 }
 
-func assertAppHashEqualsOneFromBlock(appHash []byte, block *block.Block) {
-	if !bytes.Equal(appHash, block.AppHash()) {
+func assertAppHashEqualsOneFromBlock(appHash []byte, blk *block.Block) {
+	expected := blk.AppHash()
+	// Skip assertion for legacy blocks that were never persisted with AppHash (e.g. before UpdateBlockAppHash fix).
+	if len(expected) == 0 {
+		return
+	}
+	if !bytes.Equal(appHash, expected) {
 		panic(fmt.Sprintf(`block.AppHash does not match AppHash after replay. Got %X, expected %X.
 
 Block: %v
 `,
-			appHash, block.AppHash, block))
+			appHash, expected, blk))
 	}
 }

@@ -15,7 +15,11 @@ func (p *Pacemaker) CommitBlock(blk *block.Block, escortQC *block.QuorumCert) er
 	start := time.Now()
 	p.logger.Debug("try to finalize block", "block", blk.Oneliner())
 
-	if blk.Number() <= p.chain.BestBlock().Number() {
+	best := p.chain.BestBlock()
+	if best == nil {
+		return fmt.Errorf("chain not initialized (BestBlock is nil)")
+	}
+	if blk.Number() <= best.Number() {
 		return errKnownBlock
 	}
 
@@ -34,6 +38,9 @@ func (p *Pacemaker) CommitBlock(blk *block.Block, escortQC *block.QuorumCert) er
 		return err
 	}
 	blk.BlockHeader.AppHash = appHash
+	if err := p.chain.UpdateBlockAppHash(blk.ID(), appHash); err != nil {
+		p.logger.Error("update block AppHash in chain", "err", err, "block", blk.ID())
+	}
 
 	if nxtVSet != nil {
 		p.logger.Info("next validator set is not empty", "len", len(nxtVSet.Validators))

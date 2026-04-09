@@ -59,6 +59,11 @@ func ParseConfig(cmd *cobra.Command) (*cmtcfg.Config, error) {
 		}
 	}
 
+	// Use absolute path so DB and config paths are identical on every run regardless of CWD.
+	// Avoids "invalid height: 1; expected: N" on restart when chain DB was written in a different CWD.
+	if absHome, err := filepath.Abs(home); err == nil {
+		home = absHome
+	}
 	conf.RootDir = home
 
 	conf.SetRoot(conf.RootDir)

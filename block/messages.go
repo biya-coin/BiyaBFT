@@ -11,11 +11,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/OffchainLabs/prysm/v6/crypto/bls"
 	cmtcrypto "github.com/cometbft/cometbft/v2/crypto"
 	"github.com/ethereum/go-ethereum/crypto/blake2b"
 	"github.com/ethereum/go-ethereum/rlp"
-	cmn "github.com/meterio/supernova/libs/common"
 	"github.com/meterio/supernova/types"
 	amino "github.com/tendermint/go-amino"
 )
@@ -81,15 +79,8 @@ func EncodeMsg(msg ConsensusMessage) ([]byte, error) {
 }
 
 func verifyMsgSignature(cmtPubkey cmtcrypto.PubKey, msg []byte, signature []byte) bool {
-	blsPubKey, err := cmn.BlsPublicKeyFromCmtPubKey(cmtPubkey)
-	if err != nil {
-		return false
-	}
-	sig, err := bls.SignatureFromBytes(signature)
-	if err != nil {
-		return false
-	}
-	return sig.Verify(blsPubKey, msg)
+	// P2P messages are signed with the validator's Ed25519 key (CometBFT key), not BLS.
+	return cmtPubkey.VerifySignature(msg, signature)
 }
 
 // PMProposalMessage is sent when a new block is proposed
