@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -113,33 +112,35 @@ func (app *KVStoreApplication) FinalizeBlock(_ context.Context, req *abcitypes.F
 		}
 	}
 
-	nova2PubkeyHex := "9016f8eba9f86d6a9bd880b50925b28d5dea35e9fa6de82da4a8f355ccfc68bbbe1f9374b97f67ce3e3c0689c9fa075c"
-	if req.Height == 6 {
-		pubkey, _ := hex.DecodeString(nova2PubkeyHex)
-		updates = append(updates, abcitypes.ValidatorUpdate{
-			Power:       10,
-			PubKeyBytes: pubkey,
-			PubKeyType:  "bls12-381.pubkey",
-		})
-		events = append(events, abcitypes.Event{
-			Type: "ValidatorExtra",
-			Attributes: []abcitypes.EventAttribute{
-				{Key: "pubkey", Value: nova2PubkeyHex},
-				{Key: "name", Value: "nova-2"},
-				{Key: "ip", Value: "52.22.222.17"},
-				{Key: "port", Value: "8670"},
-			},
-		})
-	}
+	/*
+		nova2PubkeyHex := "9016f8eba9f86d6a9bd880b50925b28d5dea35e9fa6de82da4a8f355ccfc68bbbe1f9374b97f67ce3e3c0689c9fa075c"
+				if req.Height == 6 {
+					pubkey, _ := hex.DecodeString(nova2PubkeyHex)
+					updates = append(updates, abcitypes.ValidatorUpdate{
+						Power:       10,
+						PubKeyBytes: pubkey,
+						PubKeyType:  "bls12-381.pubkey",
+					})
+					events = append(events, abcitypes.Event{
+						Type: "ValidatorExtra",
+						Attributes: []abcitypes.EventAttribute{
+							{Key: "pubkey", Value: nova2PubkeyHex},
+							{Key: "name", Value: "nova-2"},
+							{Key: "ip", Value: "52.22.222.17"},
+							{Key: "port", Value: "8670"},
+						},
+					})
+				}
 
-	if req.Height == 20 {
-		pubkey, _ := hex.DecodeString(nova2PubkeyHex)
-		updates = append(updates, abcitypes.ValidatorUpdate{
-			Power:       0,
-			PubKeyBytes: pubkey,
-			PubKeyType:  "bls12-381.pubkey",
-		})
-	}
+			if req.Height == 20 {
+				pubkey, _ := hex.DecodeString(nova2PubkeyHex)
+				updates = append(updates, abcitypes.ValidatorUpdate{
+					Power:       0,
+					PubKeyBytes: pubkey,
+					PubKeyType:  "bls12-381.pubkey",
+				})
+			}
+	*/
 
 	if err := app.onGoingBatch.Commit(pebble.Sync); err != nil {
 		log.Panicf("Failed to commit batch: %v", err)

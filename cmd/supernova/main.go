@@ -12,9 +12,9 @@ import (
 
 	_ "net/http/pprof"
 
-	cmtcmd "github.com/cometbft/cometbft/v2/cmd/cometbft/commands"
 	"github.com/cometbft/cometbft/v2/cmd/cometbft/commands/debug"
 	"github.com/cometbft/cometbft/v2/libs/cli"
+	"github.com/spf13/cobra"
 	"github.com/meterio/supernova/cmd/supernova/commands"
 	"github.com/meterio/supernova/txpool"
 )
@@ -43,10 +43,22 @@ const (
 
 func main() {
 	rootCmd := commands.RootCmd
+	
+	// CometBFT subcommands (similar to biyachain's comet subcommand)
+	cometCmd := &cobra.Command{
+		Use:     "comet",
+		Aliases: []string{"cometbft", "tendermint"},
+		Short:   "CometBFT subcommands",
+	}
+	cometCmd.AddCommand(
+		commands.ShowNodeIDCmd,
+	)
+	
 	rootCmd.AddCommand(
 		commands.RunNodeCmd(),
+		commands.InitFilesCmd,
+		cometCmd,
 		debug.DebugCmd,
-		cmtcmd.InitFilesCmd,
 		cli.NewCompletionCmd(rootCmd, true),
 	)
 
