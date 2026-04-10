@@ -19,7 +19,7 @@ const (
 	//  ------------------ Basics ----------------------------
 	// BlockIntervalNano: min wall-clock spacing between consecutive blocks (ns), enforced in consensus CreateLeaf.
 	// 过小会导致空块极快、日志与链状态暴涨、内存压力大；压测可调 20e6～50e6；生产请按网络与负载评估。
-	BlockIntervalNano uint64 = 1_000_000   // 100ms（本地/联调默认；原 2s 见 git 历史）
+	BlockIntervalNano uint64 = 10_000_000  // 10ms（本地/联调默认；原 2s 见 git 历史）
 	BaseTxGas         uint64 = ParamsTxGas // 21000
 	TxGas             uint64 = 5000
 
